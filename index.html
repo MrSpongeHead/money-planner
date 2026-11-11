@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.1.0';
+var APP_VERSION = '1.2.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -271,6 +271,7 @@ function defaultState() {
     incomes: [],              // {id,name,amount,freq,day,weekday,start}
     bills: [],                // {id,name,amount,freq,day,weekday,start,category}
     accounts: [],             // {id,name,colour,balance,limit,apr,payDay,payment,zeroDeal,zeroEnds,lastPaid}
+    debts: [],                // {id,type,owedTo,name,colour,balance,original,apr,payDay,payment,lastPaid}
     pots: [],                 // {id,name,colour,saved,goal,monthly,by,lastAdded}
     tx: [],                   // {id,date,type:'in'|'out',amount,category,name,paidWith,planned}
     wish: [],                 // {id,name,price,added,paidWith}
@@ -292,7 +293,7 @@ function mergeDefaults(s) {
   Object.keys(d.settings).forEach(function (k) { if (s.settings[k] === undefined) s.settings[k] = d.settings[k]; });
   if (!s.settings.helper) s.settings.helper = d.settings.helper;
   if (!s.settings.rules) s.settings.rules = d.settings.rules;
-  ['incomes', 'bills', 'accounts', 'pots', 'tx', 'wish'].forEach(function (k) { if (!Array.isArray(s[k])) s[k] = []; });
+  ['incomes', 'bills', 'accounts', 'debts', 'pots', 'tx', 'wish'].forEach(function (k) { if (!Array.isArray(s[k])) s[k] = []; });
   return s;
 }
 
@@ -378,7 +379,39 @@ function cardBills() {
     return { id: 'card:' + a.id, name: a.name + ' payment', amount: a.payment, freq: 'monthly', day: a.payDay || 1, category: 'Card payment', accountId: a.id, colour: a.colour, isCard: true };
   });
 }
-function allBills() { return S.bills.concat(cardBills()); }
+/* other debts: payments are set aside like bills until the debt is paid off */
+var DEBT_TYPES = [
+  ['loan', 'Personal loan', 'For example: my bank'],
+  ['car', 'Car finance', 'For example: the finance company'],
+  ['overdraft', 'Overdraft', 'For example: my bank'],
+  ['bnpl', 'Buy now pay later', 'For example: the shop or company'],
+  ['person', 'Money owed to a person', 'For example: Mum'],
+  ['arrears', 'Bills I am behind on', 'For example: the council'],
+  ['other', 'Other debt', 'Who the money is owed to']
+];
+function debtType(t) { for (var i = 0; i < DEBT_TYPES.length; i++) if (DEBT_TYPES[i][0] === t) return DEBT_TYPES[i]; return DEBT_TYPES[6]; }
+function debt(id) { for (var i = 0; i < S.debts.length; i++) if (S.debts[i].id === id) return S.debts[i]; return null; }
+function debtTitle(d) { return d.name || d.owedTo || debtType(d.type)[1]; }
+function debtBills() {
+  return S.debts.filter(function (d) { return d.payment > 0 && d.balance > 0; }).map(function (d) {
+    return { id: 'debt:' + d.id, name: debtTitle(d) + ' payment', amount: d.payment, freq: 'monthly', day: d.payDay || 1, category: 'Debt payment', debtId: d.id, colour: d.colour, isDebt: true };
+  });
+}
+function allBills() { return S.bills.concat(cardBills(), debtBills()); }
+/* cards and debts that have a monthly payment to confirm */
+function payable(id) { return acct(id) || debt(id); }
+function allOwed() { return S.accounts.concat(S.debts); }
+/* months until paid off at the current payment and APR */
+function payoff(x, from) {
+  var B = x.balance || 0, P = x.payment || 0, r = (x.apr || 0) / 1200, n;
+  if (B <= 0.004) return { done: true };
+  if (P <= 0) return { noPay: true };
+  if (r === 0) n = Math.ceil(B / P - 1e-9);
+  else { if (P <= B * r + 0.004) return { never: true }; n = Math.ceil(-Math.log(1 - r * B / P) / Math.log(1 + r) - 1e-9); }
+  var first = nextOccurrence({ freq: 'monthly', day: x.payDay || 1 }, from || today(), 40);
+  var last = new Date(first.getFullYear(), first.getMonth() + n - 1, 1);
+  return { months: n, date: last };
+}
 
 function plan() {
   var inc = 0, out = 0, sav = 0;
@@ -613,7 +646,15 @@ var IC = {
   phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
   bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
   home: '<path d="M3 11l9-8 9 8M5 9.5V21h14V9.5M10 21v-6h4v6"/>',
-  more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>'
+  more: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
+  owe: '<path d="M12 3v18M17 7.5C17 5.6 14.8 4 12 4S7 5.6 7 7.5 9.2 11 12 11s5 1.6 5 3.5-2.2 3.5-5 3.5-5-1.6-5-3.5"/>',
+  d_loan: '<path d="M3 10l9-6 9 6M5 10v9M19 10v9M9.5 10v9M14.5 10v9M3 21h18"/>',
+  d_car: '<path d="M3 13l2-5h14l2 5v4H3zM7 17v2M17 17v2M6.5 13h11"/>',
+  d_overdraft: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+  d_bnpl: '<path d="M3 5h18v16H3zM3 10h18M8 3v4M16 3v4M7 14h2M11 14h2M15 14h2M7 17h2"/>',
+  d_person: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/>',
+  d_arrears: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/>',
+  d_other: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>'
 };
 var CATS_OUT = [
   ['Food shop', 'M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.4a2 2 0 0 0 2-1.5L21 8H6M10 21h.01M17 21h.01'],
@@ -642,6 +683,7 @@ function ic(name, size) { return svg(IC[name] || '', size); }
 function catIcon(name, size) {
   var all = CATS_OUT.concat(CATS_IN); for (var i = 0; i < all.length; i++) if (all[i][0] === name) return svg('<path d="' + all[i][1] + '"/>', size);
   if (name === 'Card payment') return ic('card', size);
+  if (name === 'Debt payment') return ic('owe', size);
   if (name === 'Savings') return ic('jar', size);
   return ic('more', size);
 }
@@ -670,7 +712,7 @@ function nav(active) {
   function a(href, icon, label) { return '<a href="#' + href + '"' + (active === href ? ' aria-current="page"' : '') + '>' + ic(icon, 24) + label + '</a>'; }
   return '<nav class="nav" aria-label="Main"><div class="in">' + a('today', 'sun', 'Today') + a('inout', 'inout', 'In &amp; out') +
     '<a href="#add" class="plus" aria-label="Add money in or out">' + svg(IC.plus, 30, ' stroke-width="2.6"') + '</a>' +
-    a('cards', 'card', 'Cards') + a('buy', 'bag', 'Buy it?') + '</div></nav>';
+    a('cards', 'card', 'I owe') + a('buy', 'bag', 'Buy it?') + '</div></nav>';
 }
 function bar(pct, colour, cls, line) {
   pct = Math.max(0, Math.min(100, pct));
@@ -721,22 +763,29 @@ function upcomingBills(from, days) {
 function inDaysText(n) { return n === 0 ? 'today' : (n === 1 ? 'tomorrow' : 'in ' + n + ' days'); }
 function billIcon(b) {
   if (b.isCard) return '<span class="ico-box" style="background:transparent"><span class="swatch" style="background:' + esc(b.colour) + '"></span></span>';
+  if (b.isDebt) { var dd = debt(b.debtId); if (dd) return debtIcon(dd, 20); }
   return '<span class="ico-box">' + catIcon(b.category || 'Bills', 22) + '</span>';
 }
 
 function reminders(d) {
-  var out = [], k = monthKey(d), st = S.settings;
-  S.accounts.forEach(function (a) {
-    if (!(a.payment > 0) || a.lastPaid === k) return;
+  var out = [], k = monthKey(d), st = S.settings, soon = {};
+  allOwed().forEach(function (a) {
+    if (!(a.payment > 0) || a.lastPaid === k || !(a.balance > 0)) return;
+    var nm = a.limit !== undefined ? a.name : debtTitle(a);
     var due = new Date(d.getFullYear(), d.getMonth(), Math.min(a.payDay || 1, dim(d.getFullYear(), d.getMonth())));
     var n = diffDays(d, due);
     if (n < 0 || (n === 0 && st.remindOnDay)) {
       if (ui.dismissed['paid:' + a.id + ':' + iso(d)]) return;
-      out.push('<div class="card tight"><div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow"><b>Did the ' + esc(a.name) + ' payment (' + money(a.payment) + ') go out?</b></span></div>' +
+      out.push('<div class="card tight"><div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow"><b>Did the ' + esc(nm) + ' payment (' + money(a.payment) + ') go out?</b></span></div>' +
         '<div class="btnrow"><button class="btn sm" data-act="cardPaid" data-id="' + a.id + '">Yes, it went out</button><button class="btn sm ghost" data-act="dismiss" data-key="paid:' + a.id + ':' + iso(d) + '">Not yet</button></div></div>');
     } else if (n > 0 && n <= st.remindDays) {
-      out.push('<a class="item" href="#reminders">' + sig('warn', 26) + '<span class="grow"><span class="name">' + esc(a.name) + ' payment ' + inDaysText(n) + '</span><br><span class="meta">' + money(a.payment) + ' on ' + shortDate(due) + '</span></span></a>');
+      var g = soon[iso(due)] || (soon[iso(due)] = { due: due, n: n, names: [], total: 0 });
+      g.names.push(nm); g.total += a.payment;
     }
+  });
+  Object.keys(soon).sort().forEach(function (k) {
+    var g = soon[k], one = g.names.length === 1;
+    out.push('<a class="item" href="#reminders">' + sig('warn', 26) + '<span class="grow"><span class="name">' + (one ? esc(g.names[0]) + ' payment ' : g.names.length + ' payments ') + inDaysText(g.n) + '</span><br><span class="meta">' + money(g.total) + ' on ' + shortDate(g.due) + (one ? '' : ' · ' + g.names.map(esc).join(', ')) + '</span></span>' + ic('next', 18) + '</a>');
   });
   S.accounts.forEach(function (a) {
     if (!zeroActive(a, d)) return;
@@ -858,12 +907,12 @@ function vInOut() {
     var bills = allBills().slice().sort(function (a, b) { return perMonth(b.amount, b.freq) - perMonth(a.amount, a.freq); });
     h += '<section class="list"><h2 class="sec-title">' + ic('up', 18) + 'Money out</h2>';
     h += bills.length ? bills.map(function (b) {
-      var paid = b.freq === 'monthly' && dueDayInMonth(b, d.getFullYear(), d.getMonth()) < d.getDate() && (!b.isCard || (acct(b.accountId) || {}).lastPaid === monthKey(d));
-      var href = b.isCard ? '#card/' + b.accountId : '#item/bill/' + b.id;
-      return '<a class="item" href="' + href + '">' + (b.isCard ? '<span class="swatch sm" style="background:' + esc(b.colour) + '"></span>' : '') + '<span class="grow col"><span class="name">' + esc(b.name) + '</span><span class="meta">' + freqText(b) + '</span></span>' +
+      var paid = b.freq === 'monthly' && dueDayInMonth(b, d.getFullYear(), d.getMonth()) < d.getDate() && (b.isCard ? (acct(b.accountId) || {}).lastPaid === monthKey(d) : b.isDebt ? (debt(b.debtId) || {}).lastPaid === monthKey(d) : true);
+      var href = b.isCard ? '#card/' + b.accountId : b.isDebt ? '#debt/' + b.debtId : '#item/bill/' + b.id;
+      return '<a class="item" href="' + href + '">' + (b.isCard || b.isDebt ? '<span class="swatch sm" style="background:' + esc(b.colour) + '"></span>' : '') + '<span class="grow col"><span class="name">' + esc(b.name) + '</span><span class="meta">' + freqText(b) + '</span></span>' +
         (paid ? '<span class="flag ok-ink">' + sig('ok', 18) + 'Paid</span>' : '') + '<span class="amt">' + money(b.amount) + '</span></a>';
     }).join('') : '<p class="muted small">Nothing added yet.</p>';
-    h += '<a class="linkbtn" href="#item/bill/new">+ Add a regular bill</a><p class="small muted">Card payments are set on the Cards screen.</p></section>';
+    h += '<a class="linkbtn" href="#item/bill/new">+ Add a regular bill</a><p class="small muted">Card and debt payments are set on the “What I owe” screen.</p></section>';
   } else {
     var list = oneoffs.slice().sort(function (a, b) { return a.date < b.date ? 1 : -1; });
     h += '<section class="list">' + (list.length ? list.map(function (t) {
@@ -938,14 +987,7 @@ function saveItem(kind, id) {
 
 /* ===== Money Planner – cards, warnings, buying, extras ===== */
 
-function vCards() {
-  var owed = 0, interest = 0;
-  S.accounts.forEach(function (a) { owed += a.balance || 0; interest += monthlyInterest(a); });
-  var h = '<header class="hdr"><div class="titles"><span class="sub">Credit &amp; store accounts</span><h1>My cards</h1></div><div class="tools"><button class="round q" data-act="help" aria-label="Help for this screen">?</button><a class="btn sm sec" href="#card/new" style="width:auto">' + ic('plus', 18) + 'Add</a></div></header>';
-  if (!S.accounts.length) return h + empty('No cards or store accounts added yet.', 'card/new', 'Add a card or store account');
-  h += '<section class="grid2"><div class="card tight"><span class="small muted">Total I owe</span><span class="mid">' + money0(owed) + '</span></div>' +
-    '<a class="card tight" href="#interest" style="text-decoration:none;color:inherit"><span class="small muted">Interest this month</span><span class="mid">≈ ' + money0(interest) + '</span><span class="small" style="color:var(--primary);font-weight:700">Which costs most? →</span></a></section>';
-  h += S.accounts.map(function (a) {
+function cardItem(a) {
     var pct = usedPct(a), r = S.settings.rules, kind = pct >= r.stopLimit ? 'stop' : (pct >= r.closeLimit ? 'warn' : '');
     var mi = monthlyInterest(a), intTxt;
     if (zeroActive(a)) intTxt = 'Interest £0 · 0% deal ends ' + dayMonth(parseISO(a.zeroEnds)) + ' ' + parseISO(a.zeroEnds).getFullYear();
@@ -956,8 +998,6 @@ function vCards() {
       (a.limit > 0 ? '<div role="img" aria-label="' + pct + ' percent of the limit used">' + bar(pct, kind ? STATUS_FILL[kind] : 'var(--primary)', 'thin') + '</div>' +
         '<div class="row between small muted"><span>' + pct + '% of ' + money0(a.limit) + ' limit used</span>' + (kind ? '<span class="flag ' + kind + '-ink">' + sig(kind, 16) + (kind === 'stop' ? 'At or near limit' : 'Close to limit') + '</span>' : '') + '</div>' : '') +
       '<div class="pills"><span class="tiny" style="background:var(--bg);border-radius:.5rem;padding:.25rem .5rem">APR ' + (a.apr ? a.apr + '%' : '–') + '</span><span class="tiny" style="background:var(--primary-soft);color:var(--primary-deep);border-radius:.5rem;padding:.25rem .5rem;font-weight:700">' + intTxt + '</span></div></a>';
-  }).join('');
-  return h;
 }
 
 function vCard(id) {
@@ -968,7 +1008,7 @@ function vCard(id) {
   }
   var f = ui.card, back = ui.cardBack || 'cards';
   var h = backHeader(isNew ? 'Add a card or store account' : 'Change this card', back, { sub: ui.cardBack && ui.cardBack.indexOf('setup') === 0 ? 'Setting up · step 3 of 6' : '' });
-  h += '<div class="card tight row"><span class="tiny muted">How it will look:</span><span class="swatch" style="background:' + esc(f.colour) + '"></span><span class="grow" style="font-weight:700">' + esc(f.name || 'Name') + '</span><span style="font-weight:700">' + money0(num(f.balance) || 0) + ' owed</span></div>';
+  h += '<div class="card tight row"><span class="tiny muted">How it will look:</span><span class="swatch" style="background:' + esc(f.colour) + '"></span><span class="grow" style="font-weight:700" data-pv="title">' + esc(f.name || 'Name') + '</span><span style="font-weight:700" data-pv="owed">' + money0(num(f.balance) || 0) + ' owed</span></div>';
   h += '<label class="fld">Name (what I call it)<input class="inp" data-bind="card.name" value="' + esc(f.name) + '" placeholder="For example: the name on the card"></label>';
   h += '<fieldset style="border:0;margin:0;padding:0" class="col"><legend class="sec-title" style="font-size:.9rem;margin-bottom:.4rem">Colour (pick one like the real card)</legend><div class="pills">' + COLOURS.map(function (c) {
     var on = f.colour === c[1];
@@ -1004,21 +1044,21 @@ function saveCard(id) {
 }
 
 function vInterest() {
-  var list = S.accounts.map(function (a) { return { a: a, m: monthlyInterest(a), p: zeroActive(a) ? 0 : (a.apr || 0) / 12 }; });
+  var list = allOwed().map(function (a) { return { a: a, n: a.limit !== undefined ? a.name : debtTitle(a), m: monthlyInterest(a), p: zeroActive(a) ? 0 : (a.apr || 0) / 12 }; });
   var total = list.reduce(function (s, x) { return s + x.m; }, 0);
   var h = backHeader('Which costs me most?', 'cards');
-  if (!list.length) return h + empty('No cards added yet.', 'card/new', 'Add a card');
+  if (!list.length) return h + empty('No cards or debts added yet.', 'cards', 'Go to What I owe');
   h += '<section class="card hero"><span>Interest is costing me about</span><span style="font-size:2.6rem;font-weight:700;line-height:1">' + money2(total) + ' <span style="font-size:1.1rem;font-weight:400">a month</span></span><span>That is about ' + money2(total * 12 / 365) + ' a day, or ' + money0(total * 12) + ' a year.</span></section>';
   function bars(arr, key, fmt, colour) {
     var max = Math.max.apply(null, arr.map(function (x) { return x[key]; }).concat([0.0001]));
     return arr.slice().sort(function (a, b) { return b[key] - a[key]; }).map(function (x) {
-      return '<div class="hbar col" style="gap:.2rem"><div class="top"><span class="row" style="gap:.4rem"><span class="swatch sm" style="background:' + esc(x.a.colour) + '"></span>' + esc(x.a.name) + (zeroActive(x.a) ? ' (0% deal)' : '') + '</span><b>' + fmt(x[key]) + '</b></div>' + bar(x[key] / max * 100, colour, 'xthin') + '</div>';
+      return '<div class="hbar col" style="gap:.2rem"><div class="top"><span class="row" style="gap:.4rem"><span class="swatch sm" style="background:' + esc(x.a.colour) + '"></span>' + esc(x.n) + (zeroActive(x.a) ? ' (0% deal)' : '') + '</span><b>' + fmt(x[key]) + '</b></div>' + bar(x[key] / max * 100, colour, 'xthin') + '</div>';
     }).join('');
   }
   h += '<section class="card"><h2>Interest each month</h2><div class="hbars">' + bars(list, 'm', money2, 'var(--primary)') + '</div></section>';
   h += '<section class="card"><h2>Cost for every £100 I owe</h2><span class="small muted">Shows which account is the most expensive to owe money on.</span><div class="hbars">' + bars(list, 'p', money2, 'var(--primary-mid)') + '</div></section>';
   var top = list.filter(function (x) { return x.a.balance > 0 && x.p > 0; }).sort(function (a, b) { return b.p - a.p; })[0];
-  if (top) h += '<section class="card soft"><div class="row top">' + ic('bulb', 26) + '<span>Got some spare money? Paying extra to the <b>' + esc(top.a.name) + '</b> saves the most interest. £50 extra means about ' + money2(50 * top.p / 100) + ' less interest every month.</span></div></section>';
+  if (top) h += '<section class="card soft"><div class="row top">' + ic('bulb', 26) + '<span>Got some spare money? Paying extra to the <b>' + esc(top.n) + '</b> saves the most interest. £50 extra means about ' + money2(50 * top.p / 100) + ' less interest every month.</span></div></section>';
   h += '<p class="tiny muted">These are estimates (balance × APR ÷ 12). The real interest on a statement can be a little different.</p>';
   return h;
 }
@@ -1199,12 +1239,12 @@ function vReminders() {
       (a.apr ? '<span class="small muted">If ' + money0(a.balance) + ' is still owed then, interest could be about ' + money2(after) + ' a month at ' + a.apr + '% APR. Check the real rate on the statement.</span>' : '<span class="small muted">Add the APR that starts after the deal to see what it could cost.</span>') +
       '<span class="small row" style="gap:.4rem;font-weight:700">' + ic('bell', 18) + 'I will be reminded from ' + dayMonth(remind) + ' ' + remind.getFullYear() + '</span></section>';
   });
-  var pays = S.accounts.filter(function (a) { return a.payment > 0; });
-  h += '<section class="list"><h2 class="sec-title">Card payments due</h2>' + (pays.length ? pays.map(function (a) {
+  var pays = allOwed().filter(function (a) { return a.payment > 0 && a.balance > 0; });
+  h += '<section class="list"><h2 class="sec-title">Card and debt payments due</h2>' + (pays.length ? pays.map(function (a) {
     var due = nextOccurrence({ freq: 'monthly', day: a.payDay || 1 }, d, 40), rem = addDays(due, -st.remindDays);
     var paid = a.lastPaid === monthKey(due);
-    return '<div class="item"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><span class="name">' + esc(a.name) + '</span><span class="meta">Due ' + shortDate(due) + (paid ? ' · already paid' : ' · reminder ' + (rem < d ? 'now' : shortDate(rem))) + '</span></span><span class="amt">' + money(a.payment) + '</span></div>';
-  }).join('') : '<p class="small muted">No card payments set. Add them on the Cards screen.</p>') + '</section>';
+    return '<div class="item"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><span class="name">' + esc(a.limit !== undefined ? a.name : debtTitle(a)) + '</span><span class="meta">Due ' + shortDate(due) + (paid ? ' · already paid' : ' · reminder ' + (rem < d ? 'now' : shortDate(rem))) + '</span></span><span class="amt">' + money(a.payment) + '</span></div>';
+  }).join('') : '<p class="small muted">No payments set. Add them on the “What I owe” screen.</p>') + '</section>';
   h += '<section class="card"><b>Remind me before a payment</b>' + seg('set.remindDays', [[1, '1 day'], [3, '3 days'], [7, '1 week']], st.remindDays) +
     '<div class="setrow"><span>Also remind me on the day</span>' + sw('set.remindOnDay', st.remindOnDay, 'Also remind me on the day') + '</div></section>';
   h += '<p class="small muted">Reminders show on the Today screen when I open the app.</p>';
@@ -1216,7 +1256,7 @@ function vReminders() {
 function weekStart(d) { return addDays(d, -((d.getDay() + 6) % 7)); }
 
 function vCheckIn() {
-  var d = today(), step = ui.ciStep, labels = ['Add anything I forgot', 'Check card balances', 'Next week’s bills', 'How my week went'];
+  var d = today(), step = ui.ciStep, labels = ['Add anything I forgot', 'Check what I owe', 'Next week’s bills', 'How my week went'];
   var h = header('Weekly check-in', DAY_NAMES[S.settings.checkInDay] + 's · about 5 minutes');
   if (step >= 4) {
     h += '<section class="card ok" style="align-items:center;text-align:center">' + sig('ok', 64) + '<b style="font-size:1.4rem" class="ok-ink">Check-in done</b><span>Well done. See you next ' + DAY_NAMES[S.settings.checkInDay] + '.</span></section>';
@@ -1235,11 +1275,11 @@ function vCheckIn() {
     h += '<h2 style="font-size:1.3rem">Is there anything I forgot to add this week?</h2>' + (wk.length ? '<div class="list">' + wk.map(function (t) { return '<div class="row between small"><span>' + shortDate(parseISO(t.date)) + ' · ' + esc(t.name) + '</span><b>' + money2(t.amount) + '</b></div>'; }).join('') + '</div>' : '<span class="muted">Nothing added in the last 7 days.</span>') +
       '<button class="btn sm sec" data-act="ciAdd">' + ic('plus', 18) + 'Add something I forgot</button>';
   } else if (step === 1) {
-    h += '<h2 style="font-size:1.3rem">Do these balances match my card apps or statements?</h2>' + (S.accounts.length ? S.accounts.map(function (a) {
+    h += '<h2 style="font-size:1.3rem">Do these balances match my statements and apps?</h2>' + (allOwed().length ? allOwed().filter(function (a) { return a.limit !== undefined || a.balance > 0; }).map(function (a) {
       var ok = ui.ciOk && ui.ciOk[a.id];
-      return '<div class="row" style="border-top:1px solid var(--track);padding-top:.6rem"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><b>' + esc(a.name) + '</b><span class="small">' + money2(a.balance || 0) + ' owed</span></span>' +
+      return '<div class="row" style="border-top:1px solid var(--track);padding-top:.6rem"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><b>' + esc(a.limit !== undefined ? a.name : debtTitle(a)) + '</b><span class="small">' + money2(a.balance || 0) + ' owed</span></span>' +
         (ok ? '<span class="flag ok-ink">' + sig('ok', 20) + 'Matches</span>' : '<button class="btn sm sec" style="width:auto" data-act="ciMatch" data-id="' + a.id + '">Yes</button><button class="btn sm ghost" style="width:auto" data-act="ciChange" data-id="' + a.id + '">Change</button>') + '</div>';
-    }).join('') : '<span class="muted">No cards added.</span>');
+    }).join('') : '<span class="muted">No cards or debts added.</span>');
   } else if (step === 2) {
     var nx = upcomingBills(addDays(d, 1), 7);
     var tot = nx.reduce(function (s, u) { return s + u.b.amount; }, 0);
@@ -1289,10 +1329,10 @@ function vSettings() {
 /* ---------- Helper ---------- */
 function summaryText() {
   var d = today(), c = calc(d), hp = S.settings.helper, owed = 0, int = 0;
-  S.accounts.forEach(function (a) { owed += a.balance || 0; int += monthlyInterest(a); });
+  allOwed().forEach(function (a) { owed += a.balance || 0; int += monthlyInterest(a); });
   var lines = ['Money Planner – ' + longDate(d), STATUS_TEXT[c.status][0], 'Spending money left this month: ' + money0(c.left) + ' (about ' + money2(c.perDay) + ' a day)'];
   if (c.payday) lines.push('Pay day: ' + longDate(c.payday));
-  if (hp.balances && S.accounts.length) { lines.push('Owed on cards: ' + money0(owed)); lines.push('Interest this month: about ' + money0(int)); }
+  if (hp.balances && allOwed().length) { lines.push('Owed on cards and debts: ' + money0(owed)); lines.push('Interest this month: about ' + money0(int)); }
   if (hp.purchases) {
     var wk = S.tx.filter(function (t) { return t.type === 'out' && t.date > iso(addDays(d, -7)); });
     if (wk.length) { lines.push('', 'Spending in the last 7 days:'); wk.forEach(function (t) { lines.push('• ' + shortDate(parseISO(t.date)) + ' ' + t.name + ' ' + money2(t.amount) + (t.planned ? '' : ' (extra)')); }); }
@@ -1301,15 +1341,15 @@ function summaryText() {
 }
 function vHelper() {
   var hp = S.settings.helper, c = calc(), owed = 0, int = 0;
-  S.accounts.forEach(function (a) { owed += a.balance || 0; int += monthlyInterest(a); });
+  allOwed().forEach(function (a) { owed += a.balance || 0; int += monthlyInterest(a); });
   var h = backHeader('Trusted helper', 'settings');
   h += '<p class="muted">Someone I trust can help me. I stay in charge and can turn this off at any time.</p>';
   h += '<section class="card"><h2>What my helper sees</h2><div style="border:2px dashed var(--muted);border-radius:.8rem;padding:.7rem .85rem" class="col">' +
     '<span class="flag ' + c.status + '-ink" style="font-size:1rem">' + sig(c.status, 20) + STATUS_TEXT[c.status][0] + '</span>' +
     '<div class="row between small"><span>Spending money left</span><b>' + money0(c.left) + '</b></div>' +
-    (hp.balances && S.accounts.length ? '<div class="row between small"><span>Owed on cards</span><b>' + money0(owed) + '</b></div><div class="row between small"><span>Interest this month</span><b>≈ ' + money0(int) + '</b></div>' : '') +
+    (hp.balances && allOwed().length ? '<div class="row between small"><span>Owed on cards and debts</span><b>' + money0(owed) + '</b></div><div class="row between small"><span>Interest this month</span><b>≈ ' + money0(int) + '</b></div>' : '') +
     (hp.purchases ? '<span class="small muted">+ each thing I bought in the last 7 days</span>' : '') + '</div>' +
-    '<div class="setrow"><span>Include card balances</span>' + sw('helper.balances', hp.balances, 'Include card balances') + '</div>' +
+    '<div class="setrow"><span>Include what I owe</span>' + sw('helper.balances', hp.balances, 'Include what I owe') + '</div>' +
     '<div class="setrow"><span>Include each thing I buy</span>' + sw('helper.purchases', hp.purchases, 'Include each thing I buy') + '</div>' +
     '<div class="setrow"><span>Offer to send it after my weekly check-in</span>' + sw('helper.weekly', hp.weekly, 'Offer to send it after my weekly check-in') + '</div>' +
     '<button class="btn" data-act="sendSummary">' + ic('share', 20) + 'Send my helper a summary</button></section>';
@@ -1359,9 +1399,9 @@ function vPrint() {
 /* ---------- Tour ---------- */
 var TOUR = [
   { t: 'This is how much I can spend today', p: 'My bills and savings are already taken off. If I spend less today, tomorrow’s number goes up a little.', art: function () { return '<div class="card" style="width:100%;border:3px solid var(--primary)"><span class="muted">You can spend today</span><span class="big">' + money2(calc().todayLeft) + '</span></div>' + svg(IC.up, 30, ' style="color:var(--primary)"') + '<span class="card tight" style="font-weight:700;color:var(--primary-deep)">This number is on the Today screen</span>'; } },
-  { t: 'Tap + when money goes in or out', p: 'I can do it straight away, or all at once in the evening. It takes about 10 seconds each time.', art: function () { return '<span class="card tight" style="font-weight:700;color:var(--primary-deep)">The + button is at the bottom of every screen</span>' + svg(IC.down, 30, ' style="color:var(--primary)"') + '<div class="card" style="width:100%;flex-direction:row;justify-content:space-around;align-items:center"><span class="tiny muted">Today</span><span class="tiny muted">In &amp; out</span><span style="width:4.6rem;height:4.6rem;border-radius:999px;border:4px solid var(--primary);display:flex;align-items:center;justify-content:center"><span style="width:3.6rem;height:3.6rem;border-radius:999px;background:var(--primary);color:var(--on-primary);display:flex;align-items:center;justify-content:center">' + svg(IC.plus, 30, ' stroke-width="2.6"') + '</span></span><span class="tiny muted">Cards</span><span class="tiny muted">Buy it?</span></div>'; } },
+  { t: 'Tap + when money goes in or out', p: 'I can do it straight away, or all at once in the evening. It takes about 10 seconds each time.', art: function () { return '<span class="card tight" style="font-weight:700;color:var(--primary-deep)">The + button is at the bottom of every screen</span>' + svg(IC.down, 30, ' style="color:var(--primary)"') + '<div class="card" style="width:100%;flex-direction:row;justify-content:space-around;align-items:center"><span class="tiny muted">Today</span><span class="tiny muted">In &amp; out</span><span style="width:4.6rem;height:4.6rem;border-radius:999px;border:4px solid var(--primary);display:flex;align-items:center;justify-content:center"><span style="width:3.6rem;height:3.6rem;border-radius:999px;background:var(--primary);color:var(--on-primary);display:flex;align-items:center;justify-content:center">' + svg(IC.plus, 30, ' stroke-width="2.6"') + '</span></span><span class="tiny muted">I owe</span><span class="tiny muted">Buy it?</span></div>'; } },
   { t: 'Three signals, always the same', p: 'I will see these shapes all through the app. Each shape always means the same thing.', art: function () { return [['ok', 'OK', 'All is fine. Carry on as normal.'], ['warn', 'Think first / slow down', 'Nothing is wrong yet. Take a moment before spending.'], ['stop', 'Stop', 'Only pay for things in my plan until the new month.']].map(function (x) { return '<div class="card tight row" style="width:100%">' + sig(x[0], 44) + '<div class="col"><b class="' + x[0] + '-ink" style="font-size:1.15rem">' + x[1] + '</b><span class="small">' + x[2] + '</span></div></div>'; }).join(''); } },
-  { t: 'My cards show what I owe', p: 'Each card has its own colour. The bar shows how full it is, and I can see how much interest it costs each month.', art: function () { return '<div class="card tight" style="width:100%"><div class="row"><span class="swatch" style="background:#2F6FB5"></span><b class="grow">My credit card</b><b>£2,300 owed</b></div>' + bar(77, 'var(--primary)', 'thin') + '<span class="small muted">77% of £3,000 limit used</span><span class="tiny" style="background:var(--primary-soft);color:var(--primary-deep);border-radius:.5rem;padding:.25rem .5rem;font-weight:700;align-self:flex-start">Interest ≈ £47.73 a month</span></div><span class="small muted">(an example card)</span>'; } },
+  { t: '“I owe” shows my cards and debts', p: 'Each card or debt has its own colour. Card bars show how full a card is. Green bars on debts show how much is paid off.', art: function () { return '<div class="card tight" style="width:100%"><div class="row"><span class="swatch" style="background:#2F6FB5"></span><b class="grow">My credit card</b><b>£2,300 owed</b></div>' + bar(77, 'var(--primary)', 'thin') + '<span class="small muted">77% of £3,000 limit used</span><span class="tiny" style="background:var(--primary-soft);color:var(--primary-deep);border-radius:.5rem;padding:.25rem .5rem;font-weight:700;align-self:flex-start">Interest ≈ £47.73 a month</span></div><span class="small muted">(an example card)</span>'; } },
   { t: 'Not sure? Ask “Should I buy it?”', p: 'I type what it is and how much. The app answers Yes, Think first or No, and shows me why.', art: function () { return '<div class="card tight" style="width:100%">' + ['ok', 'warn', 'stop'].map(function (k) { return '<div class="row">' + sig(k, 30) + '<b class="' + k + '-ink">' + { ok: 'Yes, go ahead', warn: 'Think first', stop: 'No, not now' }[k] + '</b></div>'; }).join('') + '</div><span class="card tight" style="font-weight:700;color:var(--primary-deep)">It is the bag button at the bottom</span>'; } }
 ];
 function vTour(n) {
@@ -1382,7 +1422,8 @@ var HELP = {
   add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['In my plan?', '“No, an extra” helps the app tell me when to slow down.']]],
   inout: ['About Money in & out', [['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it.']]],
   calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.']]],
-  cards: ['About my cards', [['The bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Interest', 'About how much the card costs me each month. It is an estimate.'], ['Tap a card', 'To change it or record a payment.']]],
+  cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],
+  debt: ['About this debt', [['Who it is owed to', 'The company, bank or person.'], ['It started at', 'The amount at the start, so the app can show how much is paid off.'], ['Monthly payment', 'Set aside like a bill until the debt is paid off.'], ['Paid off by', 'An estimate using the payment and the APR.']]],
   card: ['About this card', [['Owed now', 'How much I owe today. Check it against the statement or app.'], ['Payment', 'The amount I pay each month. It is set aside like a bill.'], ['0% deal', 'If there is one, add the end date so I get a reminder.']]],
   interest: ['About interest', [['Interest each month', 'Which card costs me the most money right now.'], ['Cost for every £100', 'Which card is the most expensive to owe money on.'], ['Estimates', 'The real interest on the statement can be a little different.']]],
   buy: ['About “Should I buy it?”', [['Type what and how much', 'Then tap Check.'], ['The answer', 'Yes, Think first, or No – always with the reasons.'], ['Remind me on pay day', 'Puts it on my wish list so I can check again later.']]],
@@ -1412,11 +1453,11 @@ function confirmSheet() {
 }
 
 /* ---------- Setup ---------- */
-var SETUP_STEPS = [['Money coming in', 'Wages, benefits, anything regular'], ['Regular bills', 'Rent, council tax, energy, phone…'], ['Cards & store accounts', 'Credit cards, store cards, catalogues'], ['Savings pots', 'Optional · can be done later'], ['My spending money', 'Worked out from the steps above'], ['Calm settings & PIN', 'Text size, colours, warnings, PIN lock']];
+var SETUP_STEPS = [['Money coming in', 'Wages, benefits, anything regular'], ['Regular bills', 'Rent, council tax, energy, phone…'], ['Cards, store accounts & debts', 'Credit cards, store cards, loans, money owed'], ['Savings pots', 'Optional · can be done later'], ['My spending money', 'Worked out from the steps above'], ['Calm settings & PIN', 'Text size, colours, warnings, PIN lock']];
 function setupSub(i) {
   if (i === 0) return S.incomes.length ? S.incomes.length + ' added' : SETUP_STEPS[0][1];
   if (i === 1) return S.bills.length ? S.bills.length + ' added · ' + money0(S.bills.reduce(function (s, b) { return s + perMonth(b.amount, b.freq); }, 0)) + ' a month' : SETUP_STEPS[1][1];
-  if (i === 2) return S.accounts.length ? S.accounts.length + ' added' : SETUP_STEPS[2][1];
+  if (i === 2) return (S.accounts.length + S.debts.length) ? (S.accounts.length + S.debts.length) + ' added' : SETUP_STEPS[2][1];
   if (i === 3) return S.pots.length ? S.pots.length + ' added' : SETUP_STEPS[3][1];
   return SETUP_STEPS[i][1];
 }
@@ -1432,13 +1473,13 @@ function vSetup() {
   if (S.setupDone) h += '<a class="btn push" href="#today">Back to Today</a>';
   else {
     h += '<a class="btn push" href="#setup/' + Math.min(done + 1, 6) + '">' + (done === 0 ? 'Start' : 'Carry on: ' + SETUP_STEPS[Math.min(done, 5)][0].toLowerCase()) + '</a>';
-    if (!S.incomes.length && !S.bills.length && !S.accounts.length) h += '<button class="linkbtn" data-act="askExample" style="text-align:center">Just looking? Try it with example data</button>';
+    if (!S.incomes.length && !S.bills.length && !S.accounts.length && !S.debts.length) h += '<button class="linkbtn" data-act="askExample" style="text-align:center">Just looking? Try it with example data</button>';
   }
   return h;
 }
 function vSetupStep(n) {
   var sub = 'Setting up · step ' + n + ' of 6', h = '';
-  function listOf(arr, href, line) { return arr.length ? '<div class="list">' + arr.map(function (x) { return '<a class="item" href="' + href(x) + '"><span class="grow col"><span class="name">' + esc(x.name) + '</span><span class="meta">' + line(x) + '</span></span>' + ic('edit', 18) + '</a>'; }).join('') + '</div>' : '<p class="muted">Nothing added yet.</p>'; }
+  function listOf(arr, href, line) { return arr.length ? '<div class="list">' + arr.map(function (x) { return '<a class="item" href="' + href(x) + '"><span class="grow col"><span class="name">' + esc(x.owedTo !== undefined ? debtTitle(x) : x.name) + '</span><span class="meta">' + line(x) + '</span></span>' + ic('edit', 18) + '</a>'; }).join('') + '</div>' : '<p class="muted">Nothing added yet.</p>'; }
   var nextBtn = '<button class="btn push" data-act="setupNext" data-val="' + n + '">' + (n === 6 ? 'Finish setting up' : 'Next step') + '</button>';
   if (n === 1) {
     h += backHeader('Money coming in', 'setup', { sub: sub }) + '<p class="muted">Add each regular amount of money that comes in, like wages or benefits.</p>' +
@@ -1449,9 +1490,11 @@ function vSetupStep(n) {
       listOf(S.bills, function (x) { return '#item/bill/' + x.id; }, function (x) { return money(x.amount) + ' · ' + freqText(x); }) +
       '<a class="btn sec" href="#item/bill/new">' + ic('plus', 20) + 'Add a regular bill</a>' + nextBtn;
   } else if (n === 3) {
-    h += backHeader('Cards & store accounts', 'setup', { sub: sub }) + '<p class="muted">Add each credit card, store card or catalogue account, with what is owed today.</p>' +
-      listOf(S.accounts, function (x) { return '#card/' + x.id; }, function (x) { return money0(x.balance || 0) + ' owed' + (x.payment ? ' · pay ' + money(x.payment) + ' on the ' + ordinal(x.payDay || 1) : ''); }) +
-      '<a class="btn sec" href="#card/new">' + ic('plus', 20) + 'Add a card or store account</a>' + nextBtn;
+    h += backHeader('Cards, store accounts & debts', 'setup', { sub: sub }) + '<p class="muted">Add each credit card, store card or catalogue account, and any other debts – loans, car finance, overdrafts, buy now pay later, money owed to a person, or bills I am behind on.</p>' +
+      '<h2 class="sec-title">' + ic('card', 20) + 'Cards &amp; store accounts</h2>' + listOf(S.accounts, function (x) { return '#card/' + x.id; }, function (x) { return money0(x.balance || 0) + ' owed' + (x.payment ? ' · pay ' + money(x.payment) + ' on the ' + ordinal(x.payDay || 1) : ''); }) +
+      '<a class="btn sec" href="#card/new">' + ic('plus', 20) + 'Add a card or store account</a>' +
+      '<h2 class="sec-title" style="margin-top:.4rem">' + ic('owe', 20) + 'Debts &amp; loans</h2>' + listOf(S.debts, function (x) { return '#debt/' + x.id; }, function (x) { return debtType(x.type)[1] + ' · ' + money0(x.balance || 0) + ' owed' + (x.payment ? ' · pay ' + money(x.payment) + ' on the ' + ordinal(x.payDay || 1) : ''); }) +
+      '<a class="btn sec" href="#debt/new">' + ic('plus', 20) + 'Add a debt or loan</a>' + nextBtn;
   } else if (n === 4) {
     h += backHeader('Savings pots', 'setup', { sub: sub }) + '<p class="muted">A pot is money put aside for something, like a holiday or Christmas. This step is optional.</p>' +
       listOf(S.pots, function (x) { return '#pot/' + x.id; }, function (x) { return money0(x.saved || 0) + (x.goal ? ' of ' + money0(x.goal) : '') + ' · +' + money0(x.monthly || 0) + ' a month'; }) +
@@ -1522,6 +1565,97 @@ function vPin() {
   return h;
 }
 
+/* ===== Money Planner – What I owe: cards plus debts & loans ===== */
+
+function vOwe() {
+  var tab = ui.oweTab || 'cards', owed = 0, interest = 0, pays = 0;
+  allOwed().forEach(function (x) { owed += x.balance || 0; interest += monthlyInterest(x); });
+  allBills().forEach(function (b) { if (b.isCard || b.isDebt) pays += b.amount; });
+  var addHref = tab === 'cards' ? 'card/new' : 'debt/new';
+  var h = '<header class="hdr"><div class="titles"><span class="sub">Cards, loans and other debts</span><h1>What I owe</h1></div><div class="tools"><button class="round q" data-act="help" aria-label="Help for this screen">?</button><a class="btn sm sec" href="#' + addHref + '" style="width:auto">' + ic('plus', 18) + 'Add</a></div></header>';
+  if (S.accounts.length || S.debts.length) {
+    h += '<section class="grid2"><div class="card tight"><span class="small muted">Total I owe</span><span class="mid">' + money0(owed) + '</span><span class="tiny muted">I pay ' + money0(pays) + ' a month</span></div>' +
+      '<a class="card tight" href="#interest" style="text-decoration:none;color:inherit"><span class="small muted">Interest this month</span><span class="mid">≈ ' + money0(interest) + '</span><span class="small" style="color:var(--primary);font-weight:700">Which costs most? →</span></a></section>';
+  }
+  h += seg('oweTab', [['cards', 'Cards (' + S.accounts.length + ')'], ['debts', 'Debts &amp; loans (' + S.debts.length + ')']], tab);
+  if (tab === 'cards') {
+    h += S.accounts.length ? S.accounts.map(cardItem).join('') : empty('No credit cards, store cards or catalogue accounts added yet.', 'card/new', 'Add a card or store account');
+  } else {
+    h += S.debts.length ? S.debts.map(debtItem).join('') : empty('No other debts added. This is for loans, car finance, overdrafts, buy now pay later, money owed to a person, or bills I am behind on.', 'debt/new', 'Add a debt or loan');
+  }
+  return h;
+}
+
+function debtIcon(d, size) {
+  return '<span class="ico-box" style="background:' + esc(d.colour) + ';color:#fff">' + ic('d_' + (d.type || 'other'), size || 22) + '</span>';
+}
+function payoffText(d) {
+  var po = payoff(d);
+  if (po.done) return '<span class="flag ok-ink">' + sig('ok', 18) + 'Paid off!</span>';
+  if (po.noPay) return '<span class="small muted">No set monthly payment</span>';
+  if (po.never) return '<span class="flag warn-ink">' + sig('warn', 18) + 'The payment does not cover the interest, so this will not go down</span>';
+  return '<span class="small">' + money(d.payment) + ' a month · paid off by about <b>' + MONTH_NAMES[po.date.getMonth()] + ' ' + po.date.getFullYear() + '</b> (' + po.months + ' payment' + (po.months === 1 ? '' : 's') + ')</span>';
+}
+function debtItem(d) {
+  var t = debtType(d.type), title = debtTitle(d), orig = Math.max(d.original || 0, d.balance || 0);
+  var paid = orig - (d.balance || 0), pct = orig > 0 ? paid / orig * 100 : 0;
+  var meta = t[1] + (d.owedTo && d.name ? ' · owed to ' + esc(d.owedTo) : '');
+  var mi = monthlyInterest(d);
+  return '<a class="card tight" href="#debt/' + d.id + '" style="text-decoration:none;color:inherit">' +
+    '<div class="row">' + debtIcon(d) + '<span class="grow col"><b>' + esc(title) + '</b><span class="small muted">' + meta + '</span></span><b style="white-space:nowrap">' + money0(d.balance || 0) + ' owed</b></div>' +
+    (orig > 0 && paid > 0.004 ? '<div role="img" aria-label="' + Math.round(pct) + ' percent paid off">' + bar(pct, 'var(--ok)', 'thin') + '</div><span class="small muted">' + money0(paid) + ' of ' + money0(orig) + ' paid off (' + Math.round(pct) + '%)</span>' : '') +
+    payoffText(d) +
+    (d.apr ? '<div class="pills"><span class="tiny" style="background:var(--bg);border-radius:.5rem;padding:.25rem .5rem">APR ' + d.apr + '%</span><span class="tiny" style="background:var(--primary-soft);color:var(--primary-deep);border-radius:.5rem;padding:.25rem .5rem;font-weight:700">Interest ≈ ' + money2(mi) + ' a month</span></div>' : '<span class="tiny muted">No interest</span>') +
+    '</a>';
+}
+
+var DEBT_COLOURS = { loan: '#2F6FB5', car: '#3D4F63', overdraft: '#C25B12', bnpl: '#B0457A', person: '#0F7F7A', arrears: '#7A5230', other: '#8A949E' };
+function vDebt(id) {
+  var isNew = id === 'new', src = isNew ? null : debt(id);
+  if (!isNew && !src) return backHeader('Not found', 'cards');
+  if (!ui.debt || ui.debt.key !== id) {
+    ui.debt = { key: id, type: src ? src.type : 'loan', owedTo: src ? src.owedTo || '' : '', name: src ? src.name || '' : '', colour: src ? src.colour : DEBT_COLOURS.loan, colourSet: !!src,
+      balance: src ? String(src.balance || 0) : '', original: src && src.original ? String(src.original) : '', apr: src && src.apr ? String(src.apr) : '',
+      payment: src && src.payment ? String(src.payment) : '', payDay: src ? String(src.payDay || '') : '', pay: '', err: '' };
+  }
+  var f = ui.debt, back = ui.debtBack || 'cards', t = debtType(f.type);
+  var h = backHeader(isNew ? 'Add a debt or loan' : 'Change this debt', back, { sub: back.indexOf('setup') === 0 ? 'Setting up · step 3 of 6' : '' });
+  h += '<div class="card tight row">' + debtIcon(f) + '<span class="grow col"><b data-pv="title">' + esc(f.name || f.owedTo || t[1]) + '</b><span class="small muted">' + t[1] + (f.owedTo && f.name ? ' · owed to ' + esc(f.owedTo) : '') + '</span></span><b data-pv="owed">' + money0(num(f.balance) || 0) + ' owed</b></div>';
+  h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">What kind of debt is it?</h2><div class="grid2">' + DEBT_TYPES.map(function (x) {
+    return '<button type="button" class="choice" style="justify-content:flex-start;padding:.4rem .7rem;font-size:.92rem;text-align:left" data-act="pick" data-group="debt.type" data-val="' + x[0] + '" aria-pressed="' + (f.type === x[0]) + '">' + ic('d_' + x[0], 22) + '<span>' + x[1] + '</span></button>';
+  }).join('') + '</div></section>';
+  h += '<label class="fld">Who is it owed to?<span class="hint">The company, bank or person.</span><input class="inp" data-bind="debt.owedTo" value="' + esc(f.owedTo) + '" placeholder="' + esc(t[2]) + '"></label>';
+  h += '<label class="fld">What I call it (optional)<span class="hint">For example: Sofa, or Loan from Mum.</span><input class="inp" data-bind="debt.name" value="' + esc(f.name) + '"></label>';
+  h += '<fieldset style="border:0;margin:0;padding:0" class="col"><legend class="sec-title" style="font-size:.9rem;margin-bottom:.4rem">Colour</legend><div class="pills">' + COLOURS.map(function (c) {
+    return '<button type="button" data-act="pick" data-group="debt.colour" data-val="' + c[1] + '" aria-pressed="' + (f.colour === c[1]) + '" aria-label="' + c[0] + '" class="cpick" style="background:' + c[1] + '"></button>';
+  }).join('') + '</div></fieldset>';
+  h += '<div class="grid2"><label class="fld">Owed now (£)<input class="inp" data-bind="debt.balance" inputmode="decimal" value="' + esc(f.balance) + '"></label>' +
+    '<label class="fld">It started at (£)<input class="inp" data-bind="debt.original" inputmode="decimal" value="' + esc(f.original) + '" placeholder="optional"></label>' +
+    '<label class="fld">I pay each month (£)<input class="inp" data-bind="debt.payment" inputmode="decimal" value="' + esc(f.payment) + '" placeholder="0"></label>' +
+    '<label class="fld">Payment day<input class="inp" data-bind="debt.payDay" inputmode="numeric" value="' + esc(f.payDay) + '" placeholder="1–31"></label></div>';
+  h += '<p class="small muted">“It started at” lets the app show how much is paid off. The monthly payment is set aside like a bill.</p>';
+  h += '<label class="fld">APR (%)<span class="hint">' + (f.type === 'person' || f.type === 'arrears' || f.type === 'bnpl' ? 'Usually there is no interest on this kind of debt – leave it empty.' : 'On the agreement or statement. Leave empty if there is no interest.') + '</span><input class="inp" data-bind="debt.apr" inputmode="decimal" value="' + esc(f.apr) + '"></label>';
+  if (f.err) h += '<p class="err" role="alert">' + f.err + '</p>';
+  if (!isNew) h += '<section class="card tight"><h2>Record a payment I made</h2><div class="row"><input class="inp" style="flex:1" data-bind="debt.pay" inputmode="decimal" placeholder="£ amount" value="' + esc(f.pay) + '"><button class="btn sm" style="width:auto" data-act="debtPay" data-id="' + id + '">Take off</button></div></section>';
+  h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="saveDebt" data-id="' + id + '">Save</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelDebt" data-id="' + id + '">Delete this debt</button>') + '</div>';
+  return h;
+}
+function saveDebt(id) {
+  var f = ui.debt;
+  if (!f.owedTo.trim() && !f.name.trim()) { f.err = 'Please type who it is owed to.'; render(); return; }
+  var bal = num(f.balance); if (!isFinite(bal) || bal < 0) { f.err = 'Please type how much is owed now.'; render(); return; }
+  var orig = num(f.original);
+  var data = { type: f.type, owedTo: f.owedTo.trim(), name: f.name.trim(), colour: f.colour, balance: round2(bal), original: orig > 0 ? round2(Math.max(orig, bal)) : round2(bal),
+    apr: num(f.apr) > 0 ? num(f.apr) : 0, payment: num(f.payment) > 0 ? round2(num(f.payment)) : 0, payDay: Math.min(31, Math.max(1, parseInt(f.payDay, 10) || 1)) };
+  var src = id === 'new' ? null : debt(id);
+  if (src && !(num(f.original) > 0)) data.original = Math.max(src.original || 0, data.balance);
+  var sensitive = !src || ['apr', 'payment', 'payDay'].some(function (k) { return src[k] !== data[k]; });
+  if (sensitive && needPin('saveDebt', id)) return;
+  if (src) Object.keys(data).forEach(function (k) { src[k] = data[k]; });
+  else { data.id = uid(); data.lastPaid = null; S.debts.push(data); }
+  save(); ui.debt = null; ui.oweTab = 'debts'; toast('Saved'); go(ui.debtBack || 'cards');
+}
+
 /* ===== Money Planner – router, events, actions ===== */
 
 var NAV_ROUTES = { today: 'today', inout: 'inout', calendar: 'inout', cards: 'cards', interest: 'cards', buy: 'buy', rules: 'buy', wish: 'buy', pots: 'today', streak: 'today' };
@@ -1559,7 +1693,8 @@ function resolve(r) {
     case 'inout': return { base: base, html: vInOut, nav: true };
     case 'calendar': return { base: base, html: vCalendar, nav: true };
     case 'item': return { base: base, html: function () { return vItem(parts[1], parts[2]); }, pin: S.setupDone && parts[2] !== 'new' };
-    case 'cards': return { base: base, html: vCards, nav: true };
+    case 'cards': return { base: base, html: vOwe, nav: true };
+    case 'debt': return { base: base, html: function () { return vDebt(parts[1]); } };
     case 'card': return { base: base, html: function () { return vCard(parts[1]); } };
     case 'interest': return { base: base, html: vInterest, nav: true };
     case 'warning': return { base: base, html: vWarning, cls: calc().status === 'stop' ? 'stop' : 'warn' };
@@ -1636,6 +1771,8 @@ var ACTIONS = {
   pick: function (el) {
     var g = el.getAttribute('data-group'), v = el.getAttribute('data-val');
     if (g === 'add.type' && ui.add) { ui.add.type = v; ui.add.cat = v === 'out' ? 'Food shop' : 'Wages'; }
+    else if (g === 'debt.type' && ui.debt) { ui.debt.type = v; if (!ui.debt.colourSet) ui.debt.colour = DEBT_COLOURS[v] || ui.debt.colour; }
+    else if (g === 'debt.colour' && ui.debt) { ui.debt.colour = v; ui.debt.colourSet = true; }
     else setByPath(g, v);
     if (g.indexOf('buy.') === 0 && ui.buy) ui.buy.result = null;
     render();
@@ -1695,7 +1832,7 @@ var ACTIONS = {
   },
   calMove: function (el) { ui.calOff += parseInt(el.getAttribute('data-val'), 10); ui.calSel = null; render(); },
   calSel: function (el) { ui.calSel = parseInt(el.getAttribute('data-val'), 10); render(); },
-  cardPaid: function (el) { var a = acct(el.getAttribute('data-id')); if (!a) return; a.balance = round2(Math.max(0, (a.balance || 0) - a.payment)); a.lastPaid = monthKey(today()); save(); toast(money(a.payment) + ' taken off the ' + a.name); render(); },
+  cardPaid: function (el) { var a = payable(el.getAttribute('data-id')); if (!a) return; var amt = Math.min(a.payment, a.balance || 0); a.balance = round2(Math.max(0, (a.balance || 0) - a.payment)); a.lastPaid = monthKey(today()); save(); toast(money(amt) + ' taken off ' + (a.limit !== undefined ? 'the ' + a.name : debtTitle(a))); render(); },
   dismiss: function (el) { ui.dismissed[el.getAttribute('data-key')] = true; render(); },
   saveCard: function (el) { var id = el && el.getAttribute ? el.getAttribute('data-id') : el; saveCard(id); },
   cardPay: function (el) {
@@ -1704,6 +1841,15 @@ var ACTIONS = {
     a.balance = round2(Math.max(0, (a.balance || 0) - amt)); a.lastPaid = monthKey(today()); save();
     ui.card.balance = String(a.balance); ui.card.pay = ''; ui.card.err = ''; toast(money2(amt) + ' taken off'); render();
   },
+  saveDebt: function (el) { var id = el && el.getAttribute ? el.getAttribute('data-id') : el; saveDebt(id); },
+  debtPay: function (el) {
+    var d = debt(el.getAttribute('data-id')), amt = round2(num(ui.debt && ui.debt.pay));
+    if (!d || !(amt > 0)) { if (ui.debt) ui.debt.err = 'Type the amount paid.'; render(); return; }
+    d.balance = round2(Math.max(0, (d.balance || 0) - amt)); d.lastPaid = monthKey(today()); save();
+    ui.debt.balance = String(d.balance); ui.debt.pay = ''; ui.debt.err = ''; toast(d.balance > 0 ? money2(amt) + ' taken off' : 'Paid off – well done!'); render();
+  },
+  askDelDebt: function (el) { ui.confirm = { title: 'Delete this debt?', text: 'It and its monthly payment will be removed from the app.', yes: 'Yes, delete', act: 'delDebt', id: el.getAttribute('data-id') }; render(); },
+  delDebt: function (id) { if (needPin('delDebt', id)) return; S.debts = S.debts.filter(function (d) { return d.id !== id; }); save(); ui.debt = null; toast('Deleted'); go(ui.debtBack || 'cards'); },
   askDelCard: function (el) { ui.confirm = { title: 'Delete this card?', text: 'Its balance and payment will be removed from the app.', yes: 'Yes, delete', act: 'delCard', id: el.getAttribute('data-id') }; render(); },
   delCard: function (id, confirmed) { if (needPin('delCard', id)) return; S.accounts = S.accounts.filter(function (a) { return a.id !== id; }); save(); ui.card = null; toast('Deleted'); go(ui.cardBack || 'cards'); },
   ackWarn: function () { var c = calc(); S.lastWarn = iso(today()) + ':' + c.status; save(); go('today'); },
@@ -1735,7 +1881,7 @@ var ACTIONS = {
   delPot: function (id) { if (needPin('delPot', id)) return; S.pots = S.pots.filter(function (p) { return p.id !== id; }); save(); ui.pot = null; toast('Deleted'); go(ui.potBack || 'pots'); },
   ciAdd: function () { ui.add = newAdd('checkin'); go('add'); },
   ciMatch: function (el) { ui.ciOk = ui.ciOk || {}; ui.ciOk[el.getAttribute('data-id')] = true; render(); },
-  ciChange: function (el) { ui.card = null; ui.cardBack = 'checkin'; go('card/' + el.getAttribute('data-id')); },
+  ciChange: function (el) { var id = el.getAttribute('data-id'); ui.card = null; ui.debt = null; ui.cardBack = 'checkin'; ui.debtBack = 'checkin'; go((acct(id) ? 'card/' : 'debt/') + id); },
   ciBack: function () { ui.ciStep = Math.max(0, ui.ciStep - 1); render(); },
   ciNext: function () { ui.ciStep++; if (ui.ciStep >= 4) { S.lastCheckIn = iso(today()); save(); ui.ciOk = {}; } render(); },
   sendSummary: function () {
@@ -1820,6 +1966,8 @@ function exportCSV() {
   allBills().forEach(function (b) { rows.push([freqText(b), 'out', b.amount.toFixed(2), FREQS[b.freq], b.name]); });
   rows.push([]); rows.push(['Card', 'Owed', 'Limit', 'APR %', 'Monthly interest (estimate)']);
   S.accounts.forEach(function (a) { rows.push([a.name, (a.balance || 0).toFixed(2), (a.limit || 0).toFixed(2), a.apr || '', monthlyInterest(a).toFixed(2)]); });
+  rows.push([]); rows.push(['Debt', 'Type', 'Owed to', 'Owed', 'Started at', 'APR %', 'Monthly payment', 'Monthly interest (estimate)']);
+  S.debts.forEach(function (d) { rows.push([debtTitle(d), debtType(d.type)[1], d.owedTo || '', (d.balance || 0).toFixed(2), (d.original || 0).toFixed(2), d.apr || '', (d.payment || 0).toFixed(2), monthlyInterest(d).toFixed(2)]); });
   downloadFile('money-planner-' + iso(today()) + '.csv', 'text/csv', '﻿' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n'));
 }
 function copyText(text, msg) {
@@ -1833,13 +1981,17 @@ function loadExample() {
   function dt(day) { return iso(new Date(y, m, Math.min(day, dim(y, m)))); }
   S = defaultState();
   S.incomes = [{ id: uid(), name: 'Wages', amount: 1620, freq: 'monthly', day: 28, weekday: 0, start: dt(28), category: 'Wages' }, { id: uid(), name: 'Other income', amount: 230, freq: 'monthly', day: 1, weekday: 0, start: dt(1), category: 'Other' }];
-  S.bills = [['Rent', 650, 1, 'Home'], ['Council tax', 120, 1, 'Bills'], ['Electricity & gas', 68, 16, 'Bills'], ['Travel pass', 62, 5, 'Travel'], ['Insurance', 50, 22, 'Bills'], ['Internet', 30, 20, 'Bills'], ['Phone', 25, 12, 'Bills'], ['Streaming', 15, 15, 'Fun']].map(function (b) { return { id: uid(), name: b[0], amount: b[1], freq: 'monthly', day: b[2], weekday: 0, start: dt(b[2]), category: b[3] }; });
+  S.bills = [['Rent', 650, 1, 'Home'], ['Council tax', 120, 1, 'Bills'], ['Electricity & gas', 68, 16, 'Bills'], ['Travel pass', 62, 5, 'Travel'], ['Internet', 30, 20, 'Bills'], ['Phone', 25, 12, 'Bills'], ['Streaming', 15, 15, 'Fun']].map(function (b) { return { id: uid(), name: b[0], amount: b[1], freq: 'monthly', day: b[2], weekday: 0, start: dt(b[2]), category: b[3] }; });
   var zeroEnd = new Date(y, m + 4, 1);
   S.accounts = [
     { id: uid(), name: 'Blue credit card', colour: '#2F6FB5', balance: 2300, limit: 3000, apr: 24.9, payDay: 25, payment: 95, zeroDeal: false, zeroEnds: '', lastPaid: dom > 25 ? monthKey(d) : null },
     { id: uid(), name: 'Catalogue account', colour: '#3D4F63', balance: 1150, limit: 1500, apr: 44.9, payDay: 25, payment: 45, zeroDeal: false, zeroEnds: '', lastPaid: dom > 25 ? monthKey(d) : null },
     { id: uid(), name: 'Store card', colour: '#7A4FA0', balance: 420, limit: 500, apr: 29.9, payDay: 25, payment: 30, zeroDeal: false, zeroEnds: '', lastPaid: dom > 25 ? monthKey(d) : null },
     { id: uid(), name: 'Silver credit card', colour: '#8A949E', balance: 900, limit: 1500, apr: 24.9, payDay: 25, payment: 50, zeroDeal: true, zeroEnds: iso(zeroEnd), lastPaid: dom > 25 ? monthKey(d) : null }
+  ];
+  S.debts = [
+    { id: uid(), type: 'person', owedTo: 'Mum', name: 'Loan from Mum', colour: '#0F7F7A', balance: 300, original: 500, apr: 0, payDay: 22, payment: 20, lastPaid: dom > 22 ? monthKey(d) : null },
+    { id: uid(), type: 'bnpl', owedTo: 'Sofa shop', name: 'Sofa', colour: '#B0457A', balance: 90, original: 120, apr: 0, payDay: 22, payment: 30, lastPaid: dom > 22 ? monthKey(d) : null }
   ];
   var lp = new Date(y, m - (dom >= 28 ? 0 : 1), 1);
   S.pots = [
@@ -1873,12 +2025,16 @@ document.addEventListener('input', function (e) {
   var p = b.split('.'); if (!ui[p[0]]) ui[p[0]] = {};
   ui[p[0]][p[1]] = e.target.value;
   if (p[0] === 'buy' && ui.buy && ui.buy.result) { ui.buy.result = null; }
+  if ((p[0] === 'card' || p[0] === 'debt') && /^(name|owedTo|balance)$/.test(p[1])) {
+    var f = ui[p[0]], tEl = document.querySelector('[data-pv="title"]'), oEl = document.querySelector('[data-pv="owed"]');
+    if (tEl) tEl.textContent = p[0] === 'card' ? (f.name || 'Name') : (f.name || f.owedTo || debtType(f.type)[1]);
+    if (oEl) oEl.textContent = money0(num(f.balance) || 0) + ' owed';
+  }
 });
 document.addEventListener('change', function (e) {
   if (e.target && e.target.getAttribute && e.target.getAttribute('data-change') === 'startDay') { ACTIONS.setStartDay(e.target.value); return; }
   if (e.target && e.target.id === 'restore-file' && e.target.files && e.target.files[0]) restoreFrom(e.target.files[0]);
   var b = e.target.getAttribute && e.target.getAttribute('data-bind');
-  if (b && /\.(name|balance)$/.test(b) && b.indexOf('card.') === 0) render();
 });
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && (ui.help || ui.confirm)) { ui.help = false; ui.confirm = null; render(); }
@@ -1890,13 +2046,14 @@ window.addEventListener('hashchange', function () {
     if (base !== 'item') ui.item = null;
     if (base !== 'card') ui.card = null;
     if (base !== 'pot') ui.pot = null;
+    if (base !== 'debt') ui.debt = null;
   }
-  if (base === 'setup') { ui.itemBack = r; ui.cardBack = r; ui.potBack = r; }
-  else if (base === 'checkin') ui.cardBack = 'checkin';
+  if (base === 'setup') { ui.itemBack = r; ui.cardBack = r; ui.potBack = r; ui.debtBack = r; }
+  else if (base === 'checkin') { ui.cardBack = 'checkin'; ui.debtBack = 'checkin'; }
   else if (base === 'inout') ui.itemBack = 'inout';
-  else if (base === 'cards') ui.cardBack = 'cards';
+  else if (base === 'cards') { ui.cardBack = 'cards'; ui.debtBack = 'cards'; }
   else if (base === 'pots') ui.potBack = 'pots';
-  if (base === 'checkin' && ['card', 'add', 'pin', 'checkin'].indexOf(prev) < 0) ui.ciStep = 0;
+  if (base === 'checkin' && ['card', 'debt', 'add', 'pin', 'checkin'].indexOf(prev) < 0) ui.ciStep = 0;
   ui.help = false; ui.confirm = null;
   render();
 });

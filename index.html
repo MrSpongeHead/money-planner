@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.2.0';
+var APP_VERSION = '1.2.1';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -1729,8 +1729,11 @@ function render() {
   var body = '';
   try { body = res.html(); } catch (e) { body = '<div class="card stop"><b>Something went wrong on this screen.</b><span class="small">' + esc(e && e.message) + '</span><a class="btn" href="#today">Go to Today</a></div>'; if (window.console) console.error(e); }
   app.className = res.nav ? 'has-nav' : '';
-  app.innerHTML = '<main class="screen ' + (res.cls || '') + '" id="main">' + body + '</main>' + (res.nav ? nav(NAV_ROUTES[res.base] || '') : '') +
+  var html = '<main class="screen ' + (res.cls || '') + '" id="main">' + body + '</main>' + (res.nav ? nav(NAV_ROUTES[res.base] || '') : '') +
     (ui.help ? helpSheet(res.base) : '') + (ui.confirm ? confirmSheet() : '');
+  // the "where I should be" line is drawn in the text colour, so it is white in the dark colours
+  if (S.settings.theme === 'dark') html = html.replace(/black line/g, 'white line').replace(/Black line/g, 'White line');
+  app.innerHTML = html;
   if (r !== lastRoute) {
     window.scrollTo(0, 0);
     var h1 = app.querySelector('h1'); if (h1) { h1.setAttribute('tabindex', '-1'); try { h1.focus({ preventScroll: true }); } catch (e) {} }

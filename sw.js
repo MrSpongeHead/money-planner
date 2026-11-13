@@ -1,5 +1,5 @@
 // Money Planner offline support. Change VERSION whenever the app is updated.
-const VERSION = 'mp-1.2.1';
+const VERSION = 'mp-1.3.0';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'fonts/atkinson-400.woff2', 'fonts/atkinson-700.woff2',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });

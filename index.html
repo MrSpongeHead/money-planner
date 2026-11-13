@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.2.1';
+var APP_VERSION = '1.3.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -280,8 +280,11 @@ function defaultState() {
       remindDays: 3, remindOnDay: true, checkInDay: 0, startDay: 1,
       pinLock: false, pin: null,
       helper: { balances: true, purchases: false, weekly: true },
-      rules: { closeLimit: 80, stopLimit: 90 }
+      rules: { closeLimit: 80, stopLimit: 90 },
+      region: 'ew'
     },
+    payOverrides: {},          // 'incomeId|nominal date' -> actual date (pay came early or late)
+    payLate: null, leftoverDone: {}, shiftNoteDone: false,
     lastWarn: null, lastBackup: null, lastCheckIn: null, lastHelperSend: null
   };
 }
@@ -293,6 +296,8 @@ function mergeDefaults(s) {
   Object.keys(d.settings).forEach(function (k) { if (s.settings[k] === undefined) s.settings[k] = d.settings[k]; });
   if (!s.settings.helper) s.settings.helper = d.settings.helper;
   if (!s.settings.rules) s.settings.rules = d.settings.rules;
+  if (!s.payOverrides || typeof s.payOverrides !== 'object') s.payOverrides = {};
+  if (!s.leftoverDone || typeof s.leftoverDone !== 'object') s.leftoverDone = {};
   ['incomes', 'bills', 'accounts', 'debts', 'pots', 'tx', 'wish'].forEach(function (k) { if (!Array.isArray(s[k])) s[k] = []; });
   return s;
 }
@@ -354,7 +359,7 @@ function perMonth(amount, freq) {
   return amount;
 }
 function dueDayInMonth(item, y, m) { return Math.min(item.day || 1, dim(y, m)); }
-function occursOn(item, d) {
+function nominalOccurs(item, d) {
   if (item.freq === 'monthly') return d.getDate() === dueDayInMonth(item, d.getFullYear(), d.getMonth());
   if (item.freq === 'weekly') return d.getDay() === (item.weekday || 0);
   if (item.freq === 'fourweekly') { if (!item.start) return false; var k = diffDays(parseISO(item.start), d); return k >= 0 && k % 28 === 0; }
@@ -368,6 +373,65 @@ function freqText(item) {
   if (item.freq === 'yearly') return 'Yearly' + (item.start ? ' · ' + dayMonth(parseISO(item.start)) : '');
   return '';
 }
+/* UK bank holidays, copied from GOV.UK's published dates (2026–2028) */
+var BANK_HOLIDAYS = {
+  ew: [['2026-01-01', 'New Year’s Day'], ['2026-04-03', 'Good Friday'], ['2026-04-06', 'Easter Monday'], ['2026-05-04', 'Early May bank holiday'], ['2026-05-25', 'Spring bank holiday'], ['2026-08-31', 'Summer bank holiday'], ['2026-12-25', 'Christmas Day'], ['2026-12-28', 'Boxing Day (substitute day)'],
+    ['2027-01-01', 'New Year’s Day'], ['2027-03-26', 'Good Friday'], ['2027-03-29', 'Easter Monday'], ['2027-05-03', 'Early May bank holiday'], ['2027-05-31', 'Spring bank holiday'], ['2027-08-30', 'Summer bank holiday'], ['2027-12-27', 'Christmas Day (substitute day)'], ['2027-12-28', 'Boxing Day (substitute day)'],
+    ['2028-01-03', 'New Year’s Day (substitute day)'], ['2028-04-14', 'Good Friday'], ['2028-04-17', 'Easter Monday'], ['2028-05-01', 'Early May bank holiday'], ['2028-05-29', 'Spring bank holiday'], ['2028-08-28', 'Summer bank holiday'], ['2028-12-25', 'Christmas Day'], ['2028-12-26', 'Boxing Day']],
+  scot: [['2026-01-01', 'New Year’s Day'], ['2026-01-02', '2nd January'], ['2026-04-03', 'Good Friday'], ['2026-05-04', 'Early May bank holiday'], ['2026-05-25', 'Spring bank holiday'], ['2026-06-15', 'World Cup bank holiday'], ['2026-08-03', 'Summer bank holiday'], ['2026-11-30', 'St Andrew’s Day'], ['2026-12-25', 'Christmas Day'], ['2026-12-28', 'Boxing Day (substitute day)'],
+    ['2027-01-01', 'New Year’s Day'], ['2027-01-04', '2nd January (substitute day)'], ['2027-03-26', 'Good Friday'], ['2027-05-03', 'Early May bank holiday'], ['2027-05-31', 'Spring bank holiday'], ['2027-08-02', 'Summer bank holiday'], ['2027-11-30', 'St Andrew’s Day'], ['2027-12-27', 'Christmas Day (substitute day)'], ['2027-12-28', 'Boxing Day (substitute day)'],
+    ['2028-01-03', 'New Year’s Day (substitute day)'], ['2028-01-04', '2nd January (substitute day)'], ['2028-04-14', 'Good Friday'], ['2028-05-01', 'Early May bank holiday'], ['2028-05-29', 'Spring bank holiday'], ['2028-08-07', 'Summer bank holiday'], ['2028-11-30', 'St Andrew’s Day'], ['2028-12-25', 'Christmas Day'], ['2028-12-26', 'Boxing Day']],
+  ni: [['2026-01-01', 'New Year’s Day'], ['2026-03-17', 'St Patrick’s Day'], ['2026-04-03', 'Good Friday'], ['2026-04-06', 'Easter Monday'], ['2026-05-04', 'Early May bank holiday'], ['2026-05-25', 'Spring bank holiday'], ['2026-07-13', 'Battle of the Boyne (substitute day)'], ['2026-08-31', 'Summer bank holiday'], ['2026-12-25', 'Christmas Day'], ['2026-12-28', 'Boxing Day (substitute day)'],
+    ['2027-01-01', 'New Year’s Day'], ['2027-03-17', 'St Patrick’s Day'], ['2027-03-26', 'Good Friday'], ['2027-03-29', 'Easter Monday'], ['2027-05-03', 'Early May bank holiday'], ['2027-05-31', 'Spring bank holiday'], ['2027-07-12', 'Battle of the Boyne'], ['2027-08-30', 'Summer bank holiday'], ['2027-12-27', 'Christmas Day (substitute day)'], ['2027-12-28', 'Boxing Day (substitute day)'],
+    ['2028-01-03', 'New Year’s Day (substitute day)'], ['2028-03-17', 'St Patrick’s Day'], ['2028-04-14', 'Good Friday'], ['2028-04-17', 'Easter Monday'], ['2028-05-01', 'Early May bank holiday'], ['2028-05-29', 'Spring bank holiday'], ['2028-07-12', 'Battle of the Boyne'], ['2028-08-28', 'Summer bank holiday'], ['2028-12-25', 'Christmas Day'], ['2028-12-26', 'Boxing Day']]
+};
+var BH_LAST_YEAR = 2028;
+var REGIONS = [['ew', 'England &amp; Wales'], ['scot', 'Scotland'], ['ni', 'N. Ireland']];
+function bankHoliday(d) {
+  var list = BANK_HOLIDAYS[S.settings.region] || BANK_HOLIDAYS.ew, k = iso(d);
+  for (var i = 0; i < list.length; i++) if (list[i][0] === k) return list[i][1];
+  return null;
+}
+function isWorkingDay(d) { var w = d.getDay(); return w !== 0 && w !== 6 && !bankHoliday(d); }
+var SHIFTS = [['before', 'On the date, or the working day before if it’s a weekend or bank holiday'], ['after', 'On the date, or the working day after if it’s a weekend or bank holiday'], ['none', 'Always on the date']];
+function shiftDate(d, rule) {
+  if (rule !== 'before' && rule !== 'after') return d;
+  var x = d, step = rule === 'before' ? -1 : 1;
+  for (var i = 0; i < 10 && !isWorkingDay(x); i++) x = addDays(x, step);
+  return x;
+}
+function hasOverrides(item) { for (var k in S.payOverrides) if (k.indexOf(item.id + '|') === 0) return true; return false; }
+/* the date money actually arrives for one nominal occurrence */
+function actualOf(item, n) {
+  var o = item.id && S.payOverrides[item.id + '|' + iso(n)];
+  if (o) return parseISO(o);
+  return shiftDate(n, item.shift);
+}
+function occursOn(item, d) {
+  if (!(item.shift === 'before' || item.shift === 'after') && !(item.id && hasOverrides(item))) return nominalOccurs(item, d);
+  var k = iso(d);
+  for (var i = -12; i <= 12; i++) { var n = addDays(d, i); if (nominalOccurs(item, n) && iso(actualOf(item, n)) === k) return true; }
+  return false;
+}
+/* next / last time an income actually arrives, with the date it was due */
+function nextPayInfoFor(item, from) {
+  for (var i = -12; i <= 400; i++) { var n = addDays(from, i); if (nominalOccurs(item, n)) { var a = actualOf(item, n); if (a >= from) return { nominal: n, actual: a }; } }
+  return null;
+}
+function lastPayInfoFor(item, from) {
+  for (var i = 12; i >= -400; i--) { var n = addDays(from, i); if (nominalOccurs(item, n)) { var a = actualOf(item, n); if (a <= from) return { nominal: n, actual: a }; } }
+  return null;
+}
+/* why a pay day moved, in plain words */
+function moveReason(item, n, a) {
+  if (sameDay(n, a)) return '';
+  var o = item.id && S.payOverrides[item.id + '|' + iso(n)];
+  if (o) return a < n ? 'my pay came in early' : 'my pay was late';
+  var bh = bankHoliday(n);
+  if (bh) return DAY_NAMES[n.getDay()] + ' ' + ordinal(n.getDate()) + ' is a bank holiday (' + bh + ')';
+  return DAY_NAMES[n.getDay()] + ' ' + ordinal(n.getDate()) + ' is a weekend';
+}
+
 function nextOccurrence(item, from, maxDays) {
   for (var i = 0; i <= (maxDays || 400); i++) { var d = addDays(from, i); if (occursOn(item, d)) return d; }
   return null;
@@ -427,23 +491,25 @@ function mainIncome() {
   S.incomes.forEach(function (i) { if (!best || perMonth(i.amount, i.freq) > perMonth(best.amount, best.freq)) best = i; });
   return best;
 }
-function nextPayday(from) {
-  var mi = mainIncome(); if (!mi) return null;
-  return nextOccurrence(mi, from || today(), 400);
-}
-function lastPayday(from) {
-  var mi = mainIncome(); if (!mi) return null;
-  var d = from || today();
-  for (var i = 0; i <= 400; i++) { var x = addDays(d, -i); if (occursOn(mi, x)) return x; }
-  return null;
-}
+function nextPayInfo(from) { var mi = mainIncome(); return mi ? nextPayInfoFor(mi, from || today()) : null; }
+function lastPayInfo(from) { var mi = mainIncome(); return mi ? lastPayInfoFor(mi, from || today()) : null; }
+function nextPayday(from) { var p = nextPayInfo(from); return p ? p.actual : null; }
+function lastPayday(from) { var p = lastPayInfo(from); return p ? p.actual : null; }
 
 function txOn(dIso) { return S.tx.filter(function (t) { return t.date === dIso; }); }
 function spentOn(dIso) { var s = 0; S.tx.forEach(function (t) { if (t.type === 'out' && t.date === dIso) s += t.amount; }); return s; }
 /* The budget month runs from the chosen start day (1–28) to the day before it next month */
 function startDay() { var n = parseInt(S.settings.startDay, 10); return n >= 1 && n <= 28 ? n : 1; }
+function followsPay() { var mi = mainIncome(); return !!(mi && mi.freq === 'monthly' && (mi.day || 1) === startDay()); }
 function period(d) {
   d = d || today();
+  if (followsPay()) {
+    var lp = lastPayInfo(d), np = nextPayInfo(addDays(d, 1));
+    if (lp && np) {
+      var e = addDays(np.actual, -1);
+      return { start: lp.actual, end: e, next: np.actual, days: diffDays(lp.actual, np.actual), startIso: iso(lp.actual), endIso: iso(e), nominalStart: lp.nominal, early: lp.actual < lp.nominal, follows: true };
+    }
+  }
   var s = startDay(), y = d.getFullYear(), m = d.getMonth();
   var st = d.getDate() >= s ? new Date(y, m, s) : new Date(y, m - 1, s);
   var next = new Date(st.getFullYear(), st.getMonth() + 1, s), end = addDays(next, -1);
@@ -769,6 +835,46 @@ function billIcon(b) {
 
 function reminders(d) {
   var out = [], k = monthKey(d), st = S.settings, soon = {};
+  var mi = mainIncome(), pr = period(d), shownEarly = false;
+  // money month started early: what happens to what was left?
+  var payUnconfirmed = pr.follows && pr.startIso === iso(d) && !S.leftoverDone['paid:' + iso(d)];
+  if (pr.follows && pr.early && !S.leftoverDone[pr.startIso] && !payUnconfirmed && !S.payLate) {
+    var prev = calc(addDays(pr.start, -1));
+    if (prev.left > 0.5) {
+      out.push('<div class="card"><div class="row top"><span class="ico-box">' + ic('jar', 22) + '</span><div class="col"><b>My new money month started early</b><span class="small">I had <b>' + money2(prev.left) + '</b> left from last month. What should happen to it?</span></div></div>' +
+        '<div class="col" style="gap:.45rem"><button class="btn sm" data-act="leftCarry" data-val="' + prev.left.toFixed(2) + '">Add it to this month’s spending money</button>' +
+        S.pots.slice(0, 3).map(function (p) { return '<button class="btn sm sec" data-act="leftPot" data-id="' + p.id + '" data-val="' + prev.left.toFixed(2) + '">Put it in my ' + esc(p.name) + ' pot</button>'; }).join('') +
+        '<button class="btn sm ghost" data-act="leftLeave">Leave it</button></div></div>');
+    } else S.leftoverDone[pr.startIso] = true;
+  }
+  if (mi && followsPay()) {
+    if (S.payLate) {
+      out.push('<div class="card tight"><div class="row"><span class="ico-box">' + ic('clock', 22) + '</span><b class="grow">Has my pay come in yet?</b></div><div class="btnrow"><button class="btn sm" data-act="payArrived">Yes, it’s here</button><button class="btn sm ghost" data-act="payStillLate">Not yet</button></div></div>');
+    } else if (pr.startIso === iso(d) && !S.leftoverDone['paid:' + iso(d)]) {
+      out.push('<div class="card tight"><div class="row"><span class="ico-box">' + ic('down', 22) + '</span><span class="grow col"><b>It’s pay day</b><span class="small muted">A new money month starts today.</span></span></div><div class="btnrow"><button class="btn sm" data-act="payHere">My pay is here</button><button class="btn sm ghost" data-act="payLate">My pay is late</button></div></div>');
+    } else {
+      var nx = nextPayInfo(addDays(d, 1)), gap = nx ? diffDays(d, nx.actual) : 99;
+      if (gap >= 1 && gap <= 3 && !ui.dismissed['early:' + iso(d)]) {
+        var why = sameDay(nx.nominal, nx.actual) ? '' : ' (moved from the ' + ordinal(nx.nominal.getDate()) + ', because ' + moveReason(mi, nx.nominal, nx.actual) + ')';
+        shownEarly = true;
+        out.push('<div class="card tight"><div class="row"><span class="ico-box">' + ic('down', 22) + '</span><span class="grow col"><b>Has my pay come in early?</b><span class="small muted">Pay day is ' + longDate(nx.actual) + why + '.</span></span></div><div class="btnrow"><button class="btn sm" data-act="payEarly">Yes – start my new month today</button><button class="btn sm ghost" data-act="dismiss" data-key="early:' + iso(d) + '">No, not yet</button></div></div>');
+      }
+    }
+  }
+  if (mi) {
+    var up = nextPayInfo(d);
+    if (up && !shownEarly && !sameDay(up.nominal, up.actual) && up.actual >= d && diffDays(d, up.actual) <= 7 && !(followsPay() && sameDay(up.actual, d))) {
+      out.push('<div class="item"><span class="ico-box">' + ic('cal', 22) + '</span><span class="grow col"><span class="name">Pay day is ' + longDate(up.actual) + ' this time</span><span class="meta">Moved from ' + DAY_NAMES[up.nominal.getDay()] + ' ' + ordinal(up.nominal.getDate()) + ', because ' + moveReason(mi, up.nominal, up.actual) + '.</span></span></div>');
+    }
+  }
+  if (!S.shiftNoteDone && S.incomes.some(function (i) { return !i.shift; })) {
+    var first = S.incomes.filter(function (i) { return !i.shift; })[0];
+    out.push('<div class="card soft"><div class="row top">' + ic('info', 24) + '<div class="col"><b>My pay day can now move for weekends and bank holidays</b><span class="small">Choose how my ' + esc(first.name.toLowerCase()) + ' is paid when the date is a weekend or bank holiday.</span></div></div>' +
+      '<div class="btnrow"><a class="btn sm" href="#item/inc/' + first.id + '">Choose now</a><button class="btn sm ghost" data-act="shiftNoteNo">Not now</button></div></div>');
+  }
+  if (d >= new Date(BH_LAST_YEAR, 10, 1) && !ui.dismissed['bh:' + iso(d)]) {
+    out.push('<div class="item">' + sig('warn', 26) + '<span class="grow col"><span class="name">Bank holiday dates need updating</span><span class="meta">The app knows them up to the end of ' + BH_LAST_YEAR + '. Ask for a new version.</span></span></div>');
+  }
   allOwed().forEach(function (a) {
     if (!(a.payment > 0) || a.lastPaid === k || !(a.balance > 0)) return;
     var nm = a.limit !== undefined ? a.name : debtTitle(a);
@@ -948,6 +1054,7 @@ function vCalendar() {
   var sd = new Date(y, m, ui.calSel), rows = '';
   allBills().forEach(function (b) { if (occursOn(b, sd)) rows += '<div class="row between"><span>' + esc(b.name) + '</span><b>' + money(b.amount) + '</b></div>'; });
   S.incomes.forEach(function (b) { if (occursOn(b, sd)) rows += '<div class="row between ok-ink"><span>' + esc(b.name) + ' (in)</span><b>' + money(b.amount) + '</b></div>'; });
+  if (bankHoliday(sd)) rows += '<div class="row small muted">' + ic('cal', 16) + 'Bank holiday: ' + esc(bankHoliday(sd)) + '</div>';
   txOn(iso(sd)).forEach(function (tx) { rows += '<div class="row between"><span>' + esc(tx.name) + (tx.type === 'in' ? ' (in)' : '') + '</span><b>' + money2(tx.amount) + '</b></div>'; });
   h += '<section class="card"><span class="muted small">' + longDate(sd) + '</span>' + (rows || '<span class="muted">Nothing on this day.</span>') +
     (allBills().some(function (b) { return occursOn(b, sd); }) ? '<span class="small ok-ink row" style="gap:.4rem">' + sig('ok', 16) + 'Bills are already set aside – they do not touch my spending money</span>' : '') + '</section>';
@@ -960,7 +1067,7 @@ function vItem(kind, id) {
   if (!ui.item || ui.item.key !== kind + '/' + id) {
     var src = null; for (var i = 0; i < list.length; i++) if (list[i].id === id) src = list[i];
     var start = src ? (src.start || iso(nextOccurrence(src, today(), 400) || today())) : iso(today());
-    ui.item = { key: kind + '/' + id, name: src ? src.name : '', amount: src ? String(src.amount) : '', freq: src ? src.freq : 'monthly', date: start, err: '' };
+    ui.item = { key: kind + '/' + id, name: src ? src.name : '', amount: src ? String(src.amount) : '', freq: src ? src.freq : 'monthly', date: start, shift: src ? (src.shift || 'none') : (kind === 'inc' ? 'before' : 'none'), err: '' };
   }
   var f = ui.item, isNew = id === 'new';
   var back = ui.itemBack || 'inout';
@@ -969,6 +1076,17 @@ function vItem(kind, id) {
   h += '<label class="fld">How much? (£)<input class="inp" data-bind="item.amount" inputmode="decimal" value="' + esc(f.amount) + '" placeholder="0.00"></label>';
   h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">How often?</h2>' + seg('item.freq', [['weekly', 'Weekly'], ['fourweekly', 'Every 4 weeks'], ['monthly', 'Monthly'], ['yearly', 'Yearly']], f.freq, 2) + '</section>';
   h += '<label class="fld">Next date it happens<span class="hint">' + (f.freq === 'monthly' ? 'It will then happen on this day each month.' : f.freq === 'weekly' ? 'It will then happen on this day each week.' : 'The app counts on from this date.') + '</span><input class="inp" type="date" data-bind="item.date" value="' + esc(f.date) + '"></label>';
+  if (kind === 'inc') {
+    h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">If it is due on a weekend or bank holiday, it is paid:</h2><div class="col" style="gap:.4rem">' + SHIFTS.map(function (x) {
+      return '<button type="button" class="choice" style="justify-content:flex-start;text-align:left;padding:.6rem .85rem" data-act="pick" data-group="item.shift" data-val="' + x[0] + '" aria-pressed="' + (f.shift === x[0]) + '">' + x[1] + '</button>';
+    }).join('') + '</div>';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(f.date)) {
+      var pdt = parseISO(f.date), tmp = { id: id === 'new' ? null : id, freq: f.freq, day: pdt.getDate(), weekday: pdt.getDay(), start: f.date, shift: f.shift };
+      var np = nextPayInfoFor(tmp, today());
+      if (np) h += '<div class="card soft tight"><b>Next payment: ' + longDate(np.actual) + '</b>' + (sameDay(np.nominal, np.actual) ? '' : '<span class="small">Moved from ' + longDate(np.nominal) + ', because ' + moveReason(tmp, np.nominal, np.actual) + '.</span>') + '</div>';
+    }
+    h += '</section>';
+  }
   if (f.err) h += '<p class="err" role="alert">' + f.err + '</p>';
   h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="saveItem" data-kind="' + kind + '" data-id="' + id + '">Save</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelItem" data-kind="' + kind + '" data-id="' + id + '">Delete this</button>') + '</div>';
   return h;
@@ -980,6 +1098,7 @@ function saveItem(kind, id) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(f.date)) f.date = iso(today());
   var dt = parseISO(f.date), list = kind === 'inc' ? S.incomes : S.bills;
   var data = { name: f.name.trim(), amount: amt, freq: f.freq, day: dt.getDate(), weekday: dt.getDay(), start: f.date };
+  if (kind === 'inc') data.shift = f.shift || 'none';
   if (id === 'new') { data.id = uid(); data.category = kind === 'inc' ? 'Wages' : 'Bills'; list.push(data); }
   else list.forEach(function (x) { if (x.id === id) Object.keys(data).forEach(function (k) { x[k] = data[k]; }); });
   save(); ui.item = null; toast('Saved'); go(ui.itemBack || 'inout');
@@ -1301,6 +1420,7 @@ function startDayControl() {
   for (var i = 1; i <= 28; i++) opts += '<option value="' + i + '"' + (i === sd ? ' selected' : '') + '>the ' + ordinal(i) + '</option>';
   var h = '<label class="fld">My money month starts on<span class="hint">Usually my pay day. Any day from the 1st to the 28th can be chosen.</span><select class="inp" data-change="startDay">' + opts + '</select></label>';
   h += '<span class="small">This money month: <b>' + dayMonth(p.start) + ' – ' + dayMonth(p.end) + '</b></span>';
+  if (followsPay()) h += '<span class="small muted">This follows my pay day, so it moves when my pay comes early or late.</span>';
   if (mi && mi.freq === 'monthly' && (mi.day || 1) <= 28 && (mi.day || 1) !== sd) h += '<button class="btn sm sec" data-act="useStartPayday">Start it on my pay day (the ' + ordinal(mi.day || 1) + ')</button>';
   else if (mi && mi.freq === 'monthly' && mi.day > 28) h += '<span class="small muted">My pay day is the ' + ordinal(mi.day) + '. The 28th is the closest day that works every month.</span>';
   return h;
@@ -1317,7 +1437,7 @@ function vSettings() {
     '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Warnings appear as</span>' + seg('set.warnStyle', [['full', 'Full screen'], ['banner', 'A box on Today']], st.warnStyle) + '</div>' +
     '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Colours</span>' + seg('set.theme', [['light', 'Light'], ['soft', 'Soft'], ['dark', 'Dark']], st.theme) + '</div>' +
     '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Weekly check-in day</span>' + seg('set.checkInDay', [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']], st.checkInDay, 7) + '</div></section>';
-  h += '<section class="card"><h2>My money month</h2>' + startDayControl() + '</section>';
+  h += '<section class="card"><h2>My money month</h2>' + startDayControl() + '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Bank holidays for</span>' + seg('set.region', REGIONS, S.settings.region || 'ew') + '<span class="tiny muted">Used to move pay days. Dates are included up to the end of ' + BH_LAST_YEAR + '.</span></div></section>';
   var links = [['reminders', 'bell', 'Reminders'], ['checkin', 'clock', 'Do my weekly check-in now'], ['rules', 'bag', 'Rules for “Should I buy it?”'], ['helper', 'people', 'Trusted helper and PIN'], ['privacy', 'shield', 'Backup &amp; privacy'], ['tour/1', 'info', 'Show me the tour again'], ['setup', 'edit', 'Setting up (income, bills, cards, pots)']];
   h += '<nav class="card" style="padding:.2rem 0;gap:0" aria-label="More settings">' + links.map(function (l, i) {
     return '<a href="#' + l[0] + '" class="row" style="min-height:3rem;padding:0 1rem;text-decoration:none;color:var(--ink);' + (i ? 'border-top:1px solid var(--track)' : '') + '"><span style="color:var(--primary)">' + ic(l[1], 22) + '</span><span class="grow">' + l[2] + '</span>' + ic('next', 18) + '</a>';
@@ -1432,6 +1552,7 @@ var HELP = {
   pots: ['About savings pots', [['Jars', 'Show how full each pot is.'], ['Each month', 'This amount is set aside on pay day, like a bill.'], ['Tap a pot', 'To put money in, take money out, or change it.']]],
   pot: ['About this pot', [['Put money in', 'Moves money from my spending money into the pot.'], ['Take money out', 'Moves money from the pot back into my spending money.']]],
   streak: ['About good days', [['A good day', 'My spending was at or under the black line that day.'], ['Days in a row', 'Starts again after a day that went over. The good days still count.']]],
+  item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly or yearly.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
   reminders: ['About reminders', [['Where they show', 'On the Today screen when I open the app.'], ['0% deals', 'I get a reminder a month before a 0% deal ends.']]],
   checkin: ['About the weekly check-in', [['Four steps', 'Add anything I forgot, check card balances, look at next week’s bills, see how the week went.'], ['When', 'The Today screen reminds me on my check-in day.']]],
   settings: ['About settings', [['Text size and colours', 'Change how the app looks.'], ['Warnings', 'Full screen, or a box on the Today screen.'], ['My money month', 'The day my spending money starts again each month. Usually my pay day.']]],
@@ -1906,6 +2027,30 @@ var ACTIONS = {
     S.settings.startDay = n; S.lastWarn = null; save(); toast('My money month now starts on the ' + ordinal(n)); render();
   },
   useStartPayday: function () { var mi = mainIncome(); if (mi) ACTIONS.setStartDay(mi.day || 1); },
+  payEarly: function () {
+    var mi = mainIncome(), np = nextPayInfo(addDays(today(), 1)); if (!mi || !np) return;
+    S.payOverrides[mi.id + '|' + iso(np.nominal)] = iso(today()); S.lastWarn = null; save(); toast('My new money month starts today'); render();
+  },
+  payHere: function () { S.leftoverDone['paid:' + iso(today())] = true; save(); render(); },
+  payLate: function () {
+    var mi = mainIncome(), lp = lastPayInfo(today()); if (!mi || !lp) return;
+    var key = mi.id + '|' + iso(lp.nominal);
+    S.payOverrides[key] = iso(addDays(today(), 1)); S.payLate = key; S.lastWarn = null; save(); toast('OK – last month carries on until my pay arrives'); render();
+  },
+  payArrived: function () { if (S.payLate) S.payOverrides[S.payLate] = iso(today()); S.payLate = null; S.leftoverDone['paid:' + iso(today())] = true; S.lastWarn = null; save(); toast('My new money month starts today'); render(); },
+  payStillLate: function () { if (S.payLate) S.payOverrides[S.payLate] = iso(addDays(today(), 1)); save(); toast('OK – I will ask again tomorrow'); render(); },
+  leftCarry: function (el) {
+    var pr = period(), amt = round2(Number(el.getAttribute('data-val')) || 0);
+    if (amt > 0) S.tx.push({ id: uid(), date: pr.startIso, type: 'in', amount: amt, category: 'Other', name: 'Left over from last money month', paidWith: null, planned: true });
+    S.leftoverDone[pr.startIso] = true; save(); toast('Added to this month'); render();
+  },
+  leftPot: function (el) {
+    var pr = period(), amt = round2(Number(el.getAttribute('data-val')) || 0), id = el.getAttribute('data-id');
+    S.pots.forEach(function (p) { if (p.id === id) p.saved = round2((p.saved || 0) + amt); });
+    S.leftoverDone[pr.startIso] = true; save(); toast('Put in the pot'); render();
+  },
+  leftLeave: function () { S.leftoverDone[period().startIso] = true; save(); render(); },
+  shiftNoteNo: function () { S.shiftNoteDone = true; save(); render(); },
   endTour: function () { S.tourDone = true; save(); go('today'); },
   setupNext: function (el) {
     var n = parseInt(el.getAttribute('data-val'), 10);
@@ -1983,7 +2128,8 @@ function loadExample() {
   var d = today(), y = d.getFullYear(), m = d.getMonth(), dom = d.getDate();
   function dt(day) { return iso(new Date(y, m, Math.min(day, dim(y, m)))); }
   S = defaultState();
-  S.incomes = [{ id: uid(), name: 'Wages', amount: 1620, freq: 'monthly', day: 28, weekday: 0, start: dt(28), category: 'Wages' }, { id: uid(), name: 'Other income', amount: 230, freq: 'monthly', day: 1, weekday: 0, start: dt(1), category: 'Other' }];
+  S.incomes = [{ id: uid(), name: 'Wages', amount: 1620, freq: 'monthly', day: 28, weekday: 0, start: dt(28), category: 'Wages', shift: 'before' }, { id: uid(), name: 'Other income', amount: 230, freq: 'monthly', day: 1, weekday: 0, start: dt(1), category: 'Other', shift: 'before' }];
+  S.shiftNoteDone = true;
   S.bills = [['Rent', 650, 1, 'Home'], ['Council tax', 120, 1, 'Bills'], ['Electricity & gas', 68, 16, 'Bills'], ['Travel pass', 62, 5, 'Travel'], ['Internet', 30, 20, 'Bills'], ['Phone', 25, 12, 'Bills'], ['Streaming', 15, 15, 'Fun']].map(function (b) { return { id: uid(), name: b[0], amount: b[1], freq: 'monthly', day: b[2], weekday: 0, start: dt(b[2]), category: b[3] }; });
   var zeroEnd = new Date(y, m + 4, 1);
   S.accounts = [
@@ -2036,6 +2182,7 @@ document.addEventListener('input', function (e) {
 });
 document.addEventListener('change', function (e) {
   if (e.target && e.target.getAttribute && e.target.getAttribute('data-change') === 'startDay') { ACTIONS.setStartDay(e.target.value); return; }
+  if (e.target && e.target.getAttribute && e.target.getAttribute('data-bind') === 'item.date') { render(); return; }
   if (e.target && e.target.id === 'restore-file' && e.target.files && e.target.files[0]) restoreFrom(e.target.files[0]);
   var b = e.target.getAttribute && e.target.getAttribute('data-bind');
 });

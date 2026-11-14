@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.5.1';
+var APP_VERSION = '1.5.2';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -973,11 +973,12 @@ function vToday() {
   h += '<section class="card"><div class="row between"><b>Spending money this month</b><span class="muted">' + money0(c.budget) + '</span></div>' +
     (startDay() !== 1 ? '<span class="small muted" style="margin-top:-.4rem">' + periodLabel(c.period) + '</span>' : '') + '<div role="img" aria-label="Used ' + Math.round(used) + ' percent. The black line shows where you should be by today.">' + bar(used, STATUS_FILL[c.status], '', c.lineFrac * 100) + '</div>' +
     '<div class="row between small muted"><span>Used ' + money0(c.spent) + ' (' + Math.round(c.usedFrac * 100) + '%)</span><span>Black line = where I should be today</span></div></section>';
-  var up = upcomingBills(d, 8).slice(0, 3);
+  var upAll = upcomingBills(d, 8), up = ui.soonAll ? upAll : upAll.slice(0, 3);
   if (up.length) {
-    h += '<section class="list"><h2 class="sec-title">Coming out soon</h2>' + up.map(function (u) {
+    var upTotal = upAll.reduce(function (s, u) { return s + u.b.amount; }, 0);
+    h += '<section class="list"><div class="row between"><h2 class="sec-title">Coming out soon</h2><span class="small muted">Next 7 days: ' + upAll.length + ' · ' + money(round2(upTotal)) + '</span></div>' + up.map(function (u) {
       return '<div class="item">' + billIcon(u.b) + '<span class="grow col"><span class="name">' + esc(u.b.name) + '</span><span class="meta">' + longDate(u.d) + ' · ' + inDaysText(u.inDays) + ' · money set aside</span></span><span class="amt">' + money(u.b.amount) + '</span></div>';
-    }).join('') + '</section>';
+    }).join('') + (upAll.length > 3 ? '<button class="btn sm ghost" data-act="soonToggle">' + (ui.soonAll ? 'Show fewer' : 'Show all ' + upAll.length) + '</button>' : '') + '</section>';
   }
   h += '<section class="grid4">' + [['calendar', 'cal', 'Calendar'], ['streak', 'star', 'Good days'], ['pots', 'jar', 'Pots'], ['wish', 'heart', 'Wish list']].map(function (x) {
     return '<a class="choice cat" href="#' + x[0] + '" style="text-decoration:none">' + ic(x[1], 22) + x[2] + '</a>';
@@ -1633,7 +1634,7 @@ function vTour(n) {
 
 /* ---------- Help ("?") ---------- */
 var HELP = {
-  today: ['About the Today screen', [['The big number', 'How much I can spend today. My bills and savings are already taken off.'], ['Left this week and this month', 'The same money, shown for the rest of the week and the rest of the month.'], ['The bar', 'How much spending money I have used. The black line shows where I should be by today.'], ['The signal at the top', 'Green circle: on track. Amber triangle: slow down. Red octagon: stop spending on extras.']]],
+  today: ['About the Today screen', [['The big number', 'How much I can spend today. My bills and savings are already taken off.'], ['Left this week and this month', 'The same money, shown for the rest of the week and the rest of the month.'], ['The bar', 'How much spending money I have used. The black line shows where I should be by today.'], ['The signal at the top', 'Green circle: on track. Amber triangle: slow down. Red octagon: stop spending on extras.'], ['Coming out soon', 'Bills due in the next 7 days. The first 3 show – tap “Show all” to see the rest.']]],
   add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['In my plan?', '“No, an extra” helps the app tell me when to slow down.']]],
   inout: ['About Money in & out', [['Counts as … a month', 'For things that are not monthly, this is the share counted each month.'], ['Set aside bar', 'For bills that come less often than monthly: how much has built up towards the next one.'], ['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it.']]],
   calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.']]],
@@ -2245,6 +2246,7 @@ var ACTIONS = {
     toast(bits.length ? 'Done: ' + bits.join(', ') : 'Nothing shared out'); go('today');
   },
   leftLeave: function () { S.leftoverDone[period().startIso] = true; save(); render(); },
+  soonToggle: function () { ui.soonAll = !ui.soonAll; render(); },
   shiftNoteNo: function () { S.shiftNoteDone = true; save(); render(); },
   endTour: function () { S.tourDone = true; save(); go('today'); },
   setupNext: function (el) {

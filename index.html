@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.3.1';
+var APP_VERSION = '1.4.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -439,7 +439,7 @@ function nextOccurrence(item, from, maxDays) {
 
 /* card payments behave like bills */
 function cardBills() {
-  return S.accounts.filter(function (a) { return a.payment > 0; }).map(function (a) {
+  return S.accounts.filter(function (a) { return a.payment > 0 && !a.payFull; }).map(function (a) {
     return { id: 'card:' + a.id, name: a.name + ' payment', amount: a.payment, freq: 'monthly', day: a.payDay || 1, category: 'Card payment', accountId: a.id, colour: a.colour, isCard: true };
   });
 }
@@ -611,8 +611,11 @@ function zeroActive(a, d) { return a.zeroDeal && a.zeroEnds && iso(d || today())
 function monthlyInterest(a, d) {
   if (!a.apr || !(a.balance > 0)) return 0;
   if (zeroActive(a, d)) return 0;
+  if (a.payFull) return Math.min(a.carried || 0, a.balance) * a.apr / 1200; // only what was not paid off
   return a.balance * a.apr / 1200;
 }
+/* what is due on the payment day: the whole balance for a pay-in-full card */
+function dueAmount(a) { return a.payFull ? (a.balance || 0) : (a.payment || 0); }
 function usedPct(a) { return a.limit > 0 ? Math.round(a.balance / a.limit * 100) : 0; }
 function paidWithName(pw) {
   if (pw === 'bank') return 'Bank card'; if (pw === 'cash') return 'Cash';
@@ -627,7 +630,7 @@ function buyCheck(price, paidWith, planned) {
   var after = (c.left - price) / c.daysLeft;
   var verdict;
   var cardPctAfter = card && card.limit > 0 ? (card.balance + price) / card.limit * 100 : 0;
-  var interest = card ? (zeroActive(card) ? 0 : price * (card.apr || 0) / 1200) : 0;
+  var interest = card ? (zeroActive(card) || (card.payFull && !(card.carried > 0)) ? 0 : price * (card.apr || 0) / 1200) : 0;
   if (price > c.left + 0.004) verdict = 'stop';
   else if (c.status === 'stop' && !planned) verdict = 'stop';
   else if (card && card.limit > 0 && cardPctAfter > r.stopLimit) verdict = 'stop';
@@ -878,17 +881,22 @@ function reminders(d) {
     out.push('<div class="item">' + sig('warn', 26) + '<span class="grow col"><span class="name">Bank holiday dates need updating</span><span class="meta">The app knows them up to the end of ' + BH_LAST_YEAR + '. Ask for a new version.</span></span></div>');
   }
   allOwed().forEach(function (a) {
-    if (!(a.payment > 0) || a.lastPaid === k || !(a.balance > 0)) return;
+    if (!(dueAmount(a) > 0) || a.lastPaid === k || !(a.balance > 0)) return;
     var nm = a.limit !== undefined ? a.name : debtTitle(a);
     var due = new Date(d.getFullYear(), d.getMonth(), Math.min(a.payDay || 1, dim(d.getFullYear(), d.getMonth())));
     var n = diffDays(d, due);
     if (n < 0 || (n === 0 && st.remindOnDay)) {
       if (ui.dismissed['paid:' + a.id + ':' + iso(d)]) return;
+      if (a.payFull) {
+        out.push('<div class="card tight"><div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><b>Did I pay the ' + esc(nm) + ' bill?</b><span class="small muted">' + money2(a.balance) + ' is owed on it now.</span></span></div>' +
+          '<div class="btnrow"><a class="btn sm" href="#fullpay/' + a.id + '">Yes, I paid it</a><button class="btn sm ghost" data-act="dismiss" data-key="paid:' + a.id + ':' + iso(d) + '">Not yet</button></div></div>');
+        return;
+      }
       out.push('<div class="card tight"><div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow"><b>Did the ' + esc(nm) + ' payment (' + money(a.payment) + ') go out?</b></span></div>' +
         '<div class="btnrow"><button class="btn sm" data-act="cardPaid" data-id="' + a.id + '">Yes, it went out</button><button class="btn sm ghost" data-act="dismiss" data-key="paid:' + a.id + ':' + iso(d) + '">Not yet</button></div></div>');
     } else if (n > 0 && n <= st.remindDays) {
       var g = soon[iso(due)] || (soon[iso(due)] = { due: due, n: n, names: [], total: 0 });
-      g.names.push(nm); g.total += a.payment;
+      g.names.push(nm); g.total += dueAmount(a);
     }
   });
   Object.keys(soon).sort().forEach(function (k) {
@@ -1112,6 +1120,8 @@ function cardItem(a) {
     var pct = usedPct(a), r = S.settings.rules, kind = pct >= r.stopLimit ? 'stop' : (pct >= r.closeLimit ? 'warn' : '');
     var mi = monthlyInterest(a), intTxt;
     if (zeroActive(a)) intTxt = 'Interest £0 · 0% deal ends ' + dayMonth(parseISO(a.zeroEnds)) + ' ' + parseISO(a.zeroEnds).getFullYear();
+    else if (a.payFull && a.carried > 0 && a.apr) intTxt = 'Interest ≈ ' + money2(mi) + ' a month on ' + money0(Math.min(a.carried, a.balance)) + ' not paid off';
+    else if (a.payFull) intTxt = 'Paid in full each month · interest £0';
     else if (!a.apr) intTxt = 'No APR entered';
     else intTxt = 'Interest ≈ ' + money2(mi) + ' a month';
     return '<a class="card tight" href="#card/' + a.id + '" style="text-decoration:none;color:inherit">' +
@@ -1125,7 +1135,7 @@ function vCard(id) {
   var isNew = id === 'new', src = isNew ? null : acct(id);
   if (!isNew && !src) return backHeader('Card not found', 'cards');
   if (!ui.card || ui.card.key !== id) {
-    ui.card = { key: id, name: src ? src.name : '', colour: src ? src.colour : COLOURS[0][1], balance: src ? String(src.balance || 0) : '', limit: src && src.limit ? String(src.limit) : '', apr: src && src.apr ? String(src.apr) : '', payDay: src ? String(src.payDay || '') : '', payment: src && src.payment ? String(src.payment) : '', zeroDeal: src ? !!src.zeroDeal : false, zeroEnds: src ? (src.zeroEnds || '') : '', pay: '', err: '' };
+    ui.card = { key: id, name: src ? src.name : '', colour: src ? src.colour : COLOURS[0][1], balance: src ? String(src.balance || 0) : '', limit: src && src.limit ? String(src.limit) : '', apr: src && src.apr ? String(src.apr) : '', payDay: src ? String(src.payDay || '') : '', payment: src && src.payment ? String(src.payment) : '', zeroDeal: src ? !!src.zeroDeal : false, zeroEnds: src ? (src.zeroEnds || '') : '', payFull: src ? !!src.payFull : false, pay: '', err: '' };
   }
   var f = ui.card, back = ui.cardBack || 'cards';
   var h = backHeader(isNew ? 'Add a card or store account' : 'Change this card', back, { sub: ui.cardBack && ui.cardBack.indexOf('setup') === 0 ? 'Setting up · step 3 of 6' : '' });
@@ -1140,7 +1150,9 @@ function vCard(id) {
     '<label class="fld">Limit (£)<input class="inp" data-bind="card.limit" inputmode="decimal" value="' + esc(f.limit) + '"></label>' +
     '<label class="fld">APR (%)<input class="inp" data-bind="card.apr" inputmode="decimal" value="' + esc(f.apr) + '"></label>' +
     '<label class="fld">Payment day<input class="inp" data-bind="card.payDay" inputmode="numeric" value="' + esc(f.payDay) + '" placeholder="1–31"></label></div>';
-  h += '<label class="fld">How much I pay each month (£)<span class="hint">This is set aside like a bill. Leave empty if I don’t pay a set amount.</span><input class="inp" data-bind="card.payment" inputmode="decimal" value="' + esc(f.payment) + '"></label>';
+  h += '<div class="card tight"><div class="setrow"><span><b>I pay this card off in full every month</b></span>' + sw('card.payFull', f.payFull, 'I pay this card off in full every month') + '</div>' +
+    (f.payFull ? '<span class="small muted">No interest is shown while the whole bill is paid each month. On the payment day the app asks if the full payment went out. Nothing extra is set aside, because what I buy with the card already comes out of my spending money.</span>' : '') + '</div>';
+  if (!f.payFull) h += '<label class="fld">How much I pay each month (£)<span class="hint">This is set aside like a bill. Leave empty if I don’t pay a set amount.</span><input class="inp" data-bind="card.payment" inputmode="decimal" value="' + esc(f.payment) + '"></label>';
   h += '<p class="small muted">The APR and limit are on the latest statement. Leave the APR empty if unsure – the interest just won’t be shown for this card.</p>';
   h += '<div class="card tight"><div class="setrow"><span>Is there a 0% deal?</span>' + sw('card.zeroDeal', f.zeroDeal, 'Is there a 0% deal') + '</div>' +
     (f.zeroDeal ? '<label class="fld">0% deal ends on<input class="inp" type="date" data-bind="card.zeroEnds" value="' + esc(f.zeroEnds) + '"></label><span class="small muted">The APR above is the rate that starts after the deal.</span>' : '') + '</div>';
@@ -1155,9 +1167,10 @@ function saveCard(id) {
   var f = ui.card;
   if (!f.name.trim()) { f.err = 'Please type a name.'; render(); return; }
   var bal = num(f.balance); if (!isFinite(bal)) bal = 0;
-  var data = { name: f.name.trim(), colour: f.colour, balance: round2(bal), limit: num(f.limit) > 0 ? round2(num(f.limit)) : 0, apr: num(f.apr) > 0 ? num(f.apr) : 0, payDay: Math.min(31, Math.max(1, parseInt(f.payDay, 10) || 1)), payment: num(f.payment) > 0 ? round2(num(f.payment)) : 0, zeroDeal: !!f.zeroDeal, zeroEnds: f.zeroDeal ? f.zeroEnds : '' };
+  var data = { name: f.name.trim(), colour: f.colour, balance: round2(bal), limit: num(f.limit) > 0 ? round2(num(f.limit)) : 0, apr: num(f.apr) > 0 ? num(f.apr) : 0, payDay: Math.min(31, Math.max(1, parseInt(f.payDay, 10) || 1)), payment: !f.payFull && num(f.payment) > 0 ? round2(num(f.payment)) : 0, zeroDeal: !!f.zeroDeal, zeroEnds: f.zeroDeal ? f.zeroEnds : '', payFull: !!f.payFull };
+  if (!data.payFull) data.carried = 0;
   var src = id === 'new' ? null : acct(id);
-  var sensitive = !src || ['limit', 'apr', 'payment', 'payDay'].some(function (k) { return src[k] !== data[k]; });
+  var sensitive = !src || ['limit', 'apr', 'payment', 'payDay', 'payFull'].some(function (k) { return src[k] !== data[k]; });
   if (sensitive && needPin('saveCard', id)) return;
   if (src) Object.keys(data).forEach(function (k) { src[k] = data[k]; });
   else { data.id = uid(); data.lastPaid = null; S.accounts.push(data); }
@@ -1165,7 +1178,7 @@ function saveCard(id) {
 }
 
 function vInterest() {
-  var list = allOwed().map(function (a) { return { a: a, n: a.limit !== undefined ? a.name : debtTitle(a), m: monthlyInterest(a), p: zeroActive(a) ? 0 : (a.apr || 0) / 12 }; });
+  var list = allOwed().map(function (a) { return { a: a, n: a.limit !== undefined ? a.name : debtTitle(a), m: monthlyInterest(a), p: zeroActive(a) || (a.payFull && !(a.carried > 0)) ? 0 : (a.apr || 0) / 12 }; });
   var total = list.reduce(function (s, x) { return s + x.m; }, 0);
   var h = backHeader('Which costs me most?', 'cards');
   if (!list.length) return h + empty('No cards or debts added yet.', 'cards', 'Go to What I owe');
@@ -1173,7 +1186,7 @@ function vInterest() {
   function bars(arr, key, fmt, colour) {
     var max = Math.max.apply(null, arr.map(function (x) { return x[key]; }).concat([0.0001]));
     return arr.slice().sort(function (a, b) { return b[key] - a[key]; }).map(function (x) {
-      return '<div class="hbar col" style="gap:.2rem"><div class="top"><span class="row" style="gap:.4rem"><span class="swatch sm" style="background:' + esc(x.a.colour) + '"></span>' + esc(x.n) + (zeroActive(x.a) ? ' (0% deal)' : '') + '</span><b>' + fmt(x[key]) + '</b></div>' + bar(x[key] / max * 100, colour, 'xthin') + '</div>';
+      return '<div class="hbar col" style="gap:.2rem"><div class="top"><span class="row" style="gap:.4rem"><span class="swatch sm" style="background:' + esc(x.a.colour) + '"></span>' + esc(x.n) + (zeroActive(x.a) ? ' (0% deal)' : x.a.payFull && !(x.a.carried > 0) ? ' (paid in full)' : '') + '</span><b>' + fmt(x[key]) + '</b></div>' + bar(x[key] / max * 100, colour, 'xthin') + '</div>';
     }).join('');
   }
   h += '<section class="card"><h2>Interest each month</h2><div class="hbars">' + bars(list, 'm', money2, 'var(--primary)') + '</div></section>';
@@ -1360,11 +1373,11 @@ function vReminders() {
       (a.apr ? '<span class="small muted">If ' + money0(a.balance) + ' is still owed then, interest could be about ' + money2(after) + ' a month at ' + a.apr + '% APR. Check the real rate on the statement.</span>' : '<span class="small muted">Add the APR that starts after the deal to see what it could cost.</span>') +
       '<span class="small row" style="gap:.4rem;font-weight:700">' + ic('bell', 18) + 'I will be reminded from ' + dayMonth(remind) + ' ' + remind.getFullYear() + '</span></section>';
   });
-  var pays = allOwed().filter(function (a) { return a.payment > 0 && a.balance > 0; });
+  var pays = allOwed().filter(function (a) { return dueAmount(a) > 0 && a.balance > 0; });
   h += '<section class="list"><h2 class="sec-title">Card and debt payments due</h2>' + (pays.length ? pays.map(function (a) {
     var due = nextOccurrence({ freq: 'monthly', day: a.payDay || 1 }, d, 40), rem = addDays(due, -st.remindDays);
     var paid = a.lastPaid === monthKey(due);
-    return '<div class="item"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><span class="name">' + esc(a.limit !== undefined ? a.name : debtTitle(a)) + '</span><span class="meta">Due ' + shortDate(due) + (paid ? ' · already paid' : ' · reminder ' + (rem < d ? 'now' : shortDate(rem))) + '</span></span><span class="amt">' + money(a.payment) + '</span></div>';
+    return '<div class="item"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><span class="name">' + esc(a.limit !== undefined ? a.name : debtTitle(a)) + '</span><span class="meta">Due ' + shortDate(due) + (paid ? ' · already paid' : ' · reminder ' + (rem < d ? 'now' : shortDate(rem))) + '</span></span><span class="amt">' + (a.payFull ? 'Full bill' : money(a.payment)) + '</span></div>';
   }).join('') : '<p class="small muted">No payments set. Add them on the “What I owe” screen.</p>') + '</section>';
   h += '<section class="card"><b>Remind me before a payment</b>' + seg('set.remindDays', [[1, '1 day'], [3, '3 days'], [7, '1 week']], st.remindDays) +
     '<div class="setrow"><span>Also remind me on the day</span>' + sw('set.remindOnDay', st.remindOnDay, 'Also remind me on the day') + '</div></section>';
@@ -1546,7 +1559,8 @@ var HELP = {
   calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.']]],
   cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],
   debt: ['About this debt', [['Who it is owed to', 'The company, bank or person.'], ['It started at', 'The amount at the start, so the app can show how much is paid off.'], ['Monthly payment', 'Set aside like a bill until the debt is paid off.'], ['Paid off by', 'An estimate using the payment and the APR.']]],
-  card: ['About this card', [['Owed now', 'How much I owe today. Check it against the statement or app.'], ['Payment', 'The amount I pay each month. It is set aside like a bill.'], ['0% deal', 'If there is one, add the end date so I get a reminder.']]],
+  fullpay: ['About paying the bill', [['How much I paid', 'The amount on the bill.'], ['The whole bill', 'If all of it was paid, there is no interest.'], ['Only part', 'Interest is charged on what was not paid.']]],
+  card: ['About this card', [['Paid in full every month', 'Turn this on if I always pay the whole bill. No interest is shown, and the app asks on payment day if the bill was paid.'], ['Owed now', 'How much I owe today. Check it against the statement or app.'], ['Payment', 'The amount I pay each month. It is set aside like a bill.'], ['0% deal', 'If there is one, add the end date so I get a reminder.']]],
   interest: ['About interest', [['Interest each month', 'Which card costs me the most money right now.'], ['Cost for every £100', 'Which card is the most expensive to owe money on.'], ['Estimates', 'The real interest on the statement can be a little different.']]],
   buy: ['About “Should I buy it?”', [['Type what and how much', 'Then tap Check.'], ['The answer', 'Yes, Think first, or No – always with the reasons.'], ['Remind me on pay day', 'Puts it on my wish list so I can check again later.']]],
   rules: ['About the rules', [['Always the same', 'The answer only depends on these rules and my numbers.']]],
@@ -1829,6 +1843,26 @@ function updateLeftSummary() {
   if (el) el.innerHTML = leftSummaryHtml(leftoverInfo().left);
 }
 
+/* ---------- recording the bill payment on a pay-in-full card ---------- */
+function vFullPay(id) {
+  var a = acct(id);
+  if (!a) return backHeader('Card not found', 'today');
+  if (!ui.fullpay || ui.fullpay.key !== id) ui.fullpay = { key: id, amount: (a.balance || 0).toFixed(2), all: 'yes', rest: '', err: '' };
+  var f = ui.fullpay;
+  var h = backHeader('I paid my ' + esc(a.name) + ' bill', 'today');
+  h += '<div class="card tight row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow" style="font-weight:700">' + esc(a.name) + '</span><b>' + money2(a.balance || 0) + ' owed now</b></div>';
+  h += '<label class="fld">How much did I pay? (£)<span class="hint">The amount on the bill. It can be less than what is owed now if I have used the card since the bill came.</span><input class="inp" data-bind="fullpay.amount" inputmode="decimal" value="' + esc(f.amount) + '"></label>';
+  h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">Did that pay the whole bill?</h2><div class="grid2">' +
+    '<button type="button" class="choice" data-act="pick" data-group="fullpay.all" data-val="yes" aria-pressed="' + (f.all === 'yes') + '">Yes, all of it</button>' +
+    '<button type="button" class="choice" data-act="pick" data-group="fullpay.all" data-val="no" aria-pressed="' + (f.all === 'no') + '">No, only part</button></div></section>';
+  if (f.all === 'yes') h += '<div class="card ok row">' + sig('ok', 28) + '<span>No interest – the whole bill was paid.</span></div>';
+  else h += '<label class="fld">How much of the bill is still not paid? (£)<input class="inp" data-bind="fullpay.rest" inputmode="decimal" value="' + esc(f.rest) + '" placeholder="0.00"></label>' +
+    '<div class="card warn row top">' + sig('warn', 28) + '<span class="small">The part that is not paid will be charged interest' + (a.apr ? ' at ' + a.apr + '% APR' : '') + '. The app will show it until the card is paid off again.</span></div>';
+  if (f.err) h += '<p class="err" role="alert">' + f.err + '</p>';
+  h += '<button class="btn push" data-act="fullPaySave" data-id="' + id + '">Save</button>';
+  return h;
+}
+
 /* ===== Money Planner – router, events, actions ===== */
 
 var NAV_ROUTES = { today: 'today', inout: 'inout', calendar: 'inout', cards: 'cards', interest: 'cards', buy: 'buy', rules: 'buy', wish: 'buy', pots: 'today', streak: 'today' };
@@ -1869,6 +1903,7 @@ function resolve(r) {
     case 'cards': return { base: base, html: vOwe, nav: true };
     case 'debt': return { base: base, html: function () { return vDebt(parts[1]); } };
     case 'leftover': return { base: base, html: vLeftover };
+    case 'fullpay': return { base: base, html: function () { return vFullPay(parts[1]); } };
     case 'card': return { base: base, html: function () { return vCard(parts[1]); } };
     case 'interest': return { base: base, html: vInterest, nav: true };
     case 'warning': return { base: base, html: vWarning, cls: calc().status === 'stop' ? 'stop' : 'warn' };
@@ -2012,10 +2047,22 @@ var ACTIONS = {
   cardPaid: function (el) { var a = payable(el.getAttribute('data-id')); if (!a) return; var amt = Math.min(a.payment, a.balance || 0); a.balance = round2(Math.max(0, (a.balance || 0) - a.payment)); a.lastPaid = monthKey(today()); save(); toast(money(amt) + ' taken off ' + (a.limit !== undefined ? 'the ' + a.name : debtTitle(a))); render(); },
   dismiss: function (el) { ui.dismissed[el.getAttribute('data-key')] = true; render(); },
   saveCard: function (el) { var id = el && el.getAttribute ? el.getAttribute('data-id') : el; saveCard(id); },
+  fullPaySave: function (el) {
+    var a = acct(el.getAttribute('data-id')), f = ui.fullpay; if (!a || !f) return;
+    var amt = round2(num(f.amount));
+    if (!(amt > 0)) { f.err = 'Please type how much was paid.'; render(); return; }
+    var rest = f.all === 'no' ? round2(num(f.rest)) : 0;
+    if (f.all === 'no' && !(rest > 0)) { f.err = 'Please type how much of the bill is still not paid.'; render(); return; }
+    a.balance = round2(Math.max(0, (a.balance || 0) - amt));
+    a.carried = Math.min(rest, a.balance); a.lastPaid = monthKey(today()); save(); ui.fullpay = null;
+    toast(rest > 0 ? 'Saved – interest will show on ' + money2(a.carried) : 'Saved – paid in full, no interest'); go('today');
+  },
   cardPay: function (el) {
     var a = acct(el.getAttribute('data-id')), amt = round2(num(ui.card && ui.card.pay));
     if (!a || !(amt > 0)) { if (ui.card) ui.card.err = 'Type the amount paid.'; render(); return; }
-    a.balance = round2(Math.max(0, (a.balance || 0) - amt)); a.lastPaid = monthKey(today()); save();
+    a.balance = round2(Math.max(0, (a.balance || 0) - amt)); a.lastPaid = monthKey(today());
+    if (a.carried > 0) a.carried = round2(Math.max(0, Math.min(a.carried - amt, a.balance)));
+    save();
     ui.card.balance = String(a.balance); ui.card.pay = ''; ui.card.err = ''; toast(money2(amt) + ' taken off'); render();
   },
   saveDebt: function (el) { var id = el && el.getAttribute ? el.getAttribute('data-id') : el; saveDebt(id); },
@@ -2266,6 +2313,7 @@ window.addEventListener('hashchange', function () {
     if (base !== 'card') ui.card = null;
     if (base !== 'pot') ui.pot = null;
     if (base !== 'debt') ui.debt = null;
+    if (base !== 'fullpay') ui.fullpay = null;
   }
   if (base === 'setup') { ui.itemBack = r; ui.cardBack = r; ui.potBack = r; ui.debtBack = r; }
   else if (base === 'checkin') { ui.cardBack = 'checkin'; ui.debtBack = 'checkin'; }

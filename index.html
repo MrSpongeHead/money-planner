@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.5.0';
+var APP_VERSION = '1.5.1';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -374,6 +374,24 @@ function nominalOccurs(item, d) {
     return ((mm % nn) + nn) % nn === 0 && Math.min(s2.getDate(), dim(d.getFullYear(), d.getMonth())) === d.getDate();
   }
   return false;
+}
+/* bills that come round less often than monthly: how much has built up towards the next one */
+function isSpread(b) { return b.freq === 'yearly' || (b.freq === 'nmonths' && b.n >= 2) || (b.freq === 'nweeks' && b.n >= 5); }
+function setAside(b, d) {
+  d = d || today();
+  var share = perMonth(b.amount, b.freq, b.n);
+  var added = parseISO(b.added || S.startDate || iso(d)); if (added > d) added = d;
+  var starts = {}, pr = period(added), guard = 0;
+  starts[iso(added)] = true;                       // the month it was added in already counts a share
+  for (pr = period(pr.next); pr.start <= d && guard < 80; pr = period(pr.next), guard++) starts[pr.startIso] = true;
+  var bal = 0, paidAny = false;
+  for (var x = added, i = 0; x <= d && i < 3000; x = addDays(x, 1), i++) {
+    if (starts[iso(x)]) bal += share;
+    if (nominalOccurs(b, x)) { bal = Math.max(0, bal - b.amount); paidAny = true; }
+  }
+  var next = nextNominal(b, addDays(d, 1)), proj = bal;
+  if (next) { guard = 0; for (pr = period(period(d).next); pr.start <= next && guard < 80; pr = period(pr.next), guard++) proj += share; }
+  return { share: share, saved: Math.min(bal, b.amount), target: b.amount, next: next, short: next ? Math.max(0, round2(b.amount - proj)) : 0, first: !paidAny };
 }
 function nextNominal(item, from) { for (var i = 0; i <= 800; i++) { var x = addDays(from, i); if (nominalOccurs(item, x)) return x; } return null; }
 function freqLabel(item) {
@@ -1009,7 +1027,7 @@ function saveAdd() {
     if (t.type === 'out') { var ac = acct(t.paidWith); if (ac) ac.balance = round2((ac.balance || 0) + amt); }
   } else {
     var dt = parseISO(a.date);
-    var item = { id: uid(), name: name, amount: amt, freq: a.freq === 'q3' ? 'nmonths' : a.freq, n: a.freq === 'q3' ? 3 : null, day: dt.getDate(), weekday: dt.getDay(), start: a.date, category: a.cat };
+    var item = { id: uid(), added: iso(today()), name: name, amount: amt, freq: a.freq === 'q3' ? 'nmonths' : a.freq, n: a.freq === 'q3' ? 3 : null, day: dt.getDate(), weekday: dt.getDay(), start: a.date, category: a.cat };
     (a.type === 'out' ? S.bills : S.incomes).push(item);
   }
   save();
@@ -1034,15 +1052,17 @@ function vInOut() {
   h += seg('inoutTab', [['regular', 'Regular'], ['oneoff', 'One-offs (' + oneoffs.length + ')']], ui.inoutTab);
   if (ui.inoutTab === 'regular') {
     h += '<section class="list"><h2 class="sec-title ok-ink">' + ic('down', 18) + 'Money in</h2>';
-    h += S.incomes.length ? S.incomes.map(function (i) { return '<a class="item" href="#item/inc/' + i.id + '"><span class="grow col"><span class="name">' + esc(i.name) + '</span><span class="meta">' + freqText(i) + '</span></span><span class="amt">' + money(i.amount) + '</span></a>'; }).join('') : '<p class="muted small">Nothing added yet.</p>';
+    h += S.incomes.length ? S.incomes.map(function (i) { return '<a class="item" href="#item/inc/' + i.id + '"><span class="grow col"><span class="name">' + esc(i.name) + '</span><span class="meta">' + freqText(i) + shareLabel(i) + '</span></span><span class="amt">' + money(i.amount) + '</span></a>'; }).join('') : '<p class="muted small">Nothing added yet.</p>';
     h += '<a class="linkbtn" href="#item/inc/new">+ Add money coming in</a></section>';
     var bills = allBills().slice().sort(function (a, b) { return perMonth(b.amount, b.freq, b.n) - perMonth(a.amount, a.freq, a.n); });
     h += '<section class="list"><h2 class="sec-title">' + ic('up', 18) + 'Money out</h2>';
     h += bills.length ? bills.map(function (b) {
       var paid = b.freq === 'monthly' && dueDayInMonth(b, d.getFullYear(), d.getMonth()) < d.getDate() && (b.isCard ? (acct(b.accountId) || {}).lastPaid === monthKey(d) : b.isDebt ? (debt(b.debtId) || {}).lastPaid === monthKey(d) : true);
       var href = b.isCard ? '#card/' + b.accountId : b.isDebt ? '#debt/' + b.debtId : '#item/bill/' + b.id;
-      return '<a class="item" href="' + href + '">' + (b.isCard || b.isDebt ? '<span class="swatch sm" style="background:' + esc(b.colour) + '"></span>' : '') + '<span class="grow col"><span class="name">' + esc(b.name) + '</span><span class="meta">' + freqText(b) + '</span></span>' +
-        (paid ? '<span class="flag ok-ink">' + sig('ok', 18) + 'Paid</span>' : '') + '<span class="amt">' + money(b.amount) + '</span></a>';
+      var top = (b.isCard || b.isDebt ? '<span class="swatch sm" style="background:' + esc(b.colour) + '"></span>' : '') + '<span class="grow col"><span class="name">' + esc(b.name) + '</span><span class="meta">' + freqText(b) + shareLabel(b) + '</span></span>' +
+        (paid ? '<span class="flag ok-ink">' + sig('ok', 18) + 'Paid</span>' : '') + '<span class="amt">' + money(b.amount) + '</span>';
+      if (!isSpread(b)) return '<a class="item" href="' + href + '">' + top + '</a>';
+      return '<a class="item" href="' + href + '" style="flex-direction:column;align-items:stretch;gap:.4rem"><span class="row">' + top + '</span>' + setAsideHtml(b) + '</a>';
     }).join('') : '<p class="muted small">Nothing added yet.</p>';
     h += '<a class="linkbtn" href="#item/bill/new">+ Add a regular bill</a><p class="small muted">Card and debt payments are set on the “What I owe” screen.</p></section>';
   } else {
@@ -1052,6 +1072,19 @@ function vInOut() {
       return '<button type="button" class="item" data-act="txMenu" data-id="' + t.id + '"><span class="ico-box">' + catIcon(t.category, 22) + '</span><span class="grow col"><span class="name">' + esc(t.name) + '</span><span class="meta">' + shortDate(parseISO(t.date)) + (t.type === 'out' ? ' · ' + esc(paidWithName(t.paidWith)) : '') + '</span></span>' + tag + '<span class="amt">' + money2(t.amount) + '</span></button>';
     }).join('') : '<p class="muted">Nothing added this month yet. Tap + to add.</p>') + '</section>';
   }
+  return h;
+}
+
+function shareLabel(x) {
+  if (x.freq === 'monthly' || !x.freq || x.freq === 'once') return '';
+  return ' · counts as ' + money(round2(perMonth(x.amount, x.freq, x.n))) + ' a month';
+}
+function setAsideHtml(b) {
+  var sa = setAside(b);
+  if (!sa.next) return '';
+  var h = '<span role="img" aria-label="' + money(sa.saved) + ' of ' + money(sa.target) + ' set aside">' + bar(sa.target > 0 ? sa.saved / sa.target * 100 : 0, 'var(--primary-mid)', 'xthin') + '</span>' +
+    '<span class="small muted">' + money(round2(sa.saved)) + ' of ' + money(sa.target) + ' set aside for ' + dayMonth(sa.next) + '</span>';
+  if (sa.short > 0.5) h += '<span class="flag warn-ink">' + sig('warn', 16) + money(sa.short) + ' short' + (sa.first ? ' the first time' : ' this time') + '</span>';
   return h;
 }
 
@@ -1107,6 +1140,7 @@ function vItem(kind, id) {
   h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">How often?</h2>' + seg('item.freq', [['weekly', 'Weekly'], ['fourweekly', 'Every 4 weeks'], ['monthly', 'Monthly'], ['q3', 'Every 3 months'], ['yearly', 'Yearly'], ['custom', 'Something else']], f.freq, 2) +
     (f.freq === 'custom' ? '<div class="card tight"><b>Every</b><div class="row"><input class="inp" style="width:5rem;flex:none;text-align:center" data-bind="item.n" inputmode="numeric" aria-label="How many" value="' + esc(f.n) + '"><div class="grow">' + seg('item.unit', [['weeks', 'weeks'], ['months', 'months']], f.unit) + '</div></div><span class="small muted">For example: every 2 weeks, or every 6 months.</span></div>' : '') + '</section>';
   h += '<div data-iv="share">' + itemShareHtml(f) + '</div>';
+  if (kind === 'bill' && !isNew) { var sb = S.bills.filter(function (x) { return x.id === id; })[0]; if (sb && isSpread(sb)) h += '<div class="card tight">' + setAsideHtml(sb) + '</div>'; }
   h += '<label class="fld">Next date it happens<span class="hint">' + (f.freq === 'monthly' ? 'It will then happen on this day each month.' : f.freq === 'weekly' ? 'It will then happen on this day each week.' : 'The app counts on from this date.') + '</span><input class="inp" type="date" data-bind="item.date" value="' + esc(f.date) + '"></label>';
   if (kind === 'inc') {
     h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">If it is due on a weekend or bank holiday, it is paid:</h2><div class="col" style="gap:.4rem">' + SHIFTS.map(function (x) {
@@ -1155,7 +1189,7 @@ function saveItem(kind, id) {
   var dt = parseISO(f.date), list = kind === 'inc' ? S.incomes : S.bills;
   var data = { name: f.name.trim(), amount: amt, freq: fr.freq, n: fr.n || null, day: dt.getDate(), weekday: dt.getDay(), start: f.date };
   if (kind === 'inc') data.shift = f.shift || 'none';
-  if (id === 'new') { data.id = uid(); data.category = kind === 'inc' ? 'Wages' : 'Bills'; list.push(data); }
+  if (id === 'new') { data.id = uid(); data.added = iso(today()); data.category = kind === 'inc' ? 'Wages' : 'Bills'; list.push(data); }
   else list.forEach(function (x) { if (x.id === id) Object.keys(data).forEach(function (k) { x[k] = data[k]; }); });
   save(); ui.item = null; toast('Saved'); go(ui.itemBack || 'inout');
 }
@@ -1601,7 +1635,7 @@ function vTour(n) {
 var HELP = {
   today: ['About the Today screen', [['The big number', 'How much I can spend today. My bills and savings are already taken off.'], ['Left this week and this month', 'The same money, shown for the rest of the week and the rest of the month.'], ['The bar', 'How much spending money I have used. The black line shows where I should be by today.'], ['The signal at the top', 'Green circle: on track. Amber triangle: slow down. Red octagon: stop spending on extras.']]],
   add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['In my plan?', '“No, an extra” helps the app tell me when to slow down.']]],
-  inout: ['About Money in & out', [['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it.']]],
+  inout: ['About Money in & out', [['Counts as … a month', 'For things that are not monthly, this is the share counted each month.'], ['Set aside bar', 'For bills that come less often than monthly: how much has built up towards the next one.'], ['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it.']]],
   calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.']]],
   cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],
   debt: ['About this debt', [['Who it is owed to', 'The company, bank or person.'], ['It started at', 'The amount at the start, so the app can show how much is paid off.'], ['Monthly payment', 'Set aside like a bill until the debt is paid off.'], ['Paid off by', 'An estimate using the payment and the APR.']]],
@@ -1614,7 +1648,7 @@ var HELP = {
   pots: ['About savings pots', [['Jars', 'Show how full each pot is.'], ['Each month', 'This amount is set aside on pay day, like a bill.'], ['Tap a pot', 'To put money in, take money out, or change it.']]],
   pot: ['About this pot', [['Put money in', 'Moves money from my spending money into the pot.'], ['Take money out', 'Moves money from the pot back into my spending money.']]],
   streak: ['About good days', [['A good day', 'My spending was at or under the black line that day.'], ['Days in a row', 'Starts again after a day that went over. The good days still count.']]],
-  item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly, every 3 months or yearly. “Something else” is for any other number of weeks or months.'], ['Spread out', 'For things that are not monthly, the app sets aside a share every month.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
+  item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly, every 3 months or yearly. “Something else” is for any other number of weeks or months.'], ['Spread out', 'For things that are not monthly, the app sets aside a share every month.'], ['Set aside so far', 'The bar shows how much has built up towards the next payment. That money is in my bank account – it should not be spent.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
   leftover: ['About sharing out', [['Type the amounts', 'Put some in each pot, some in spending money, or leave some where it is.'], ['The rest', 'Fills that box with whatever has not been shared yet.'], ['Real money', 'The app only keeps track. Move the money in my banking app too.']]],
   reminders: ['About reminders', [['Where they show', 'On the Today screen when I open the app.'], ['0% deals', 'I get a reminder a month before a 0% deal ends.']]],
   checkin: ['About the weekly check-in', [['Four steps', 'Add anything I forgot, check card balances, look at next week’s bills, see how the week went.'], ['When', 'The Today screen reminds me on my check-in day.']]],

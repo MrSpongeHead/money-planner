@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.4.0';
+var APP_VERSION = '1.5.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -352,7 +352,10 @@ function money2(n) { return money(n, 2); }
 function money0(n) { return money(Math.round(n), 0); }
 
 var FREQS = { once: 'Just once', weekly: 'Weekly', fourweekly: 'Every 4 weeks', monthly: 'Monthly', yearly: 'Yearly' };
-function perMonth(amount, freq) {
+function perMonth(amount, freq, n) {
+  n = n > 0 ? n : 1;
+  if (freq === 'nweeks') return amount * 52 / 12 / n;
+  if (freq === 'nmonths') return amount / n;
   if (freq === 'weekly') return amount * 52 / 12;
   if (freq === 'fourweekly') return amount * 13 / 12;
   if (freq === 'yearly') return amount / 12;
@@ -364,13 +367,26 @@ function nominalOccurs(item, d) {
   if (item.freq === 'weekly') return d.getDay() === (item.weekday || 0);
   if (item.freq === 'fourweekly') { if (!item.start) return false; var k = diffDays(parseISO(item.start), d); return k >= 0 && k % 28 === 0; }
   if (item.freq === 'yearly') { if (!item.start) return false; var s = parseISO(item.start); return s.getMonth() === d.getMonth() && Math.min(s.getDate(), dim(d.getFullYear(), d.getMonth())) === d.getDate(); }
+  if (item.freq === 'nweeks') { if (!item.start) return false; var step = 7 * (item.n > 0 ? item.n : 1), kk = diffDays(parseISO(item.start), d); return ((kk % step) + step) % step === 0; }
+  if (item.freq === 'nmonths') {
+    if (!item.start) return false;
+    var s2 = parseISO(item.start), nn = item.n > 0 ? item.n : 1, mm = (d.getFullYear() - s2.getFullYear()) * 12 + d.getMonth() - s2.getMonth();
+    return ((mm % nn) + nn) % nn === 0 && Math.min(s2.getDate(), dim(d.getFullYear(), d.getMonth())) === d.getDate();
+  }
   return false;
+}
+function nextNominal(item, from) { for (var i = 0; i <= 800; i++) { var x = addDays(from, i); if (nominalOccurs(item, x)) return x; } return null; }
+function freqLabel(item) {
+  if (item.freq === 'nweeks') return 'Every ' + item.n + ' weeks';
+  if (item.freq === 'nmonths') return 'Every ' + item.n + ' months';
+  return FREQS[item.freq] || '';
 }
 function freqText(item) {
   if (item.freq === 'monthly') return 'Monthly · ' + ordinal(item.day || 1);
   if (item.freq === 'weekly') return 'Weekly · ' + DAY_NAMES[item.weekday || 0] + 's';
   if (item.freq === 'fourweekly') return 'Every 4 weeks' + (item.start ? ' · from ' + dayMonth(parseISO(item.start)) : '');
   if (item.freq === 'yearly') return 'Yearly' + (item.start ? ' · ' + dayMonth(parseISO(item.start)) : '');
+  if (item.freq === 'nweeks' || item.freq === 'nmonths') { var nx = nextNominal(item, today()); return freqLabel(item) + (nx ? ' · next ' + dayMonth(nx) : ''); }
   return '';
 }
 /* UK bank holidays, copied from GOV.UK's published dates (2026–2028) */
@@ -479,8 +495,8 @@ function payoff(x, from) {
 
 function plan() {
   var inc = 0, out = 0, sav = 0;
-  S.incomes.forEach(function (i) { inc += perMonth(i.amount, i.freq); });
-  allBills().forEach(function (b) { out += perMonth(b.amount, b.freq); });
+  S.incomes.forEach(function (i) { inc += perMonth(i.amount, i.freq, i.n); });
+  allBills().forEach(function (b) { out += perMonth(b.amount, b.freq, b.n); });
   S.pots.forEach(function (p) { sav += p.monthly || 0; });
   return { income: inc, bills: out, savings: sav, spending: inc - out - sav };
 }
@@ -488,7 +504,7 @@ function plan() {
 /* pay day = next date of the biggest regular income */
 function mainIncome() {
   var best = null;
-  S.incomes.forEach(function (i) { if (!best || perMonth(i.amount, i.freq) > perMonth(best.amount, best.freq)) best = i; });
+  S.incomes.forEach(function (i) { if (!best || perMonth(i.amount, i.freq, i.n) > perMonth(best.amount, best.freq, best.n)) best = i; });
   return best;
 }
 function nextPayInfo(from) { var mi = mainIncome(); return mi ? nextPayInfoFor(mi, from || today()) : null; }
@@ -966,7 +982,7 @@ function vAdd() {
     return '<button type="button" class="choice cat" data-act="pick" data-group="add.cat" data-val="' + esc(c[0]) + '" aria-pressed="' + (a.cat === c[0]) + '">' + svg('<path d="' + c[1] + '"/>', 22) + esc(c[0]) + '</button>';
   }).join('') + '</div></section>';
   h += '<label class="fld">Name (optional)<input class="inp" data-bind="add.name" value="' + esc(a.name) + '" placeholder="For example: ' + (a.type === 'out' ? 'Big shop at the supermarket' : 'Birthday money') + '"></label>';
-  h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">How often?</h2>' + seg('add.freq', [['once', 'Just once'], ['weekly', 'Weekly'], ['monthly', 'Monthly'], ['yearly', 'Yearly']], a.freq) + '</section>';
+  h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">How often?</h2>' + seg('add.freq', [['once', 'Just once'], ['weekly', 'Weekly'], ['monthly', 'Monthly'], ['q3', 'Every 3 months'], ['yearly', 'Yearly']], a.freq, 3) + '<span class="small muted">For anything else, like every 2 weeks, use In &amp; out → Add a regular bill.</span></section>';
   h += '<label class="fld">' + (a.freq === 'once' ? 'When?' : 'Next date it happens') + '<input class="inp" type="date" data-bind="add.date" value="' + esc(a.date) + '"></label>';
   if (a.type === 'out') {
     h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">Paid with</h2><div class="pills">' +
@@ -993,7 +1009,7 @@ function saveAdd() {
     if (t.type === 'out') { var ac = acct(t.paidWith); if (ac) ac.balance = round2((ac.balance || 0) + amt); }
   } else {
     var dt = parseISO(a.date);
-    var item = { id: uid(), name: name, amount: amt, freq: a.freq, day: dt.getDate(), weekday: dt.getDay(), start: a.date, category: a.cat };
+    var item = { id: uid(), name: name, amount: amt, freq: a.freq === 'q3' ? 'nmonths' : a.freq, n: a.freq === 'q3' ? 3 : null, day: dt.getDate(), weekday: dt.getDay(), start: a.date, category: a.cat };
     (a.type === 'out' ? S.bills : S.incomes).push(item);
   }
   save();
@@ -1020,7 +1036,7 @@ function vInOut() {
     h += '<section class="list"><h2 class="sec-title ok-ink">' + ic('down', 18) + 'Money in</h2>';
     h += S.incomes.length ? S.incomes.map(function (i) { return '<a class="item" href="#item/inc/' + i.id + '"><span class="grow col"><span class="name">' + esc(i.name) + '</span><span class="meta">' + freqText(i) + '</span></span><span class="amt">' + money(i.amount) + '</span></a>'; }).join('') : '<p class="muted small">Nothing added yet.</p>';
     h += '<a class="linkbtn" href="#item/inc/new">+ Add money coming in</a></section>';
-    var bills = allBills().slice().sort(function (a, b) { return perMonth(b.amount, b.freq) - perMonth(a.amount, a.freq); });
+    var bills = allBills().slice().sort(function (a, b) { return perMonth(b.amount, b.freq, b.n) - perMonth(a.amount, a.freq, a.n); });
     h += '<section class="list"><h2 class="sec-title">' + ic('up', 18) + 'Money out</h2>';
     h += bills.length ? bills.map(function (b) {
       var paid = b.freq === 'monthly' && dueDayInMonth(b, d.getFullYear(), d.getMonth()) < d.getDate() && (b.isCard ? (acct(b.accountId) || {}).lastPaid === monthKey(d) : b.isDebt ? (debt(b.debtId) || {}).lastPaid === monthKey(d) : true);
@@ -1077,37 +1093,67 @@ function vItem(kind, id) {
   if (!ui.item || ui.item.key !== kind + '/' + id) {
     var src = null; for (var i = 0; i < list.length; i++) if (list[i].id === id) src = list[i];
     var start = src ? (src.start || iso(nextOccurrence(src, today(), 400) || today())) : iso(today());
-    ui.item = { key: kind + '/' + id, name: src ? src.name : '', amount: src ? String(src.amount) : '', freq: src ? src.freq : 'monthly', date: start, shift: src ? (src.shift || 'none') : (kind === 'inc' ? 'before' : 'none'), err: '' };
+    if (src && (src.freq === 'nweeks' || src.freq === 'nmonths')) start = iso(nextNominal(src, today()) || today());
+    var uiFreq = src ? src.freq : 'monthly', un = '2', unit = 'months';
+    if (src && src.freq === 'nmonths' && src.n === 3) uiFreq = 'q3';
+    else if (src && (src.freq === 'nweeks' || src.freq === 'nmonths')) { uiFreq = 'custom'; un = String(src.n); unit = src.freq === 'nweeks' ? 'weeks' : 'months'; }
+    ui.item = { key: kind + '/' + id, name: src ? src.name : '', amount: src ? String(src.amount) : '', freq: uiFreq, n: un, unit: unit, date: start, shift: src ? (src.shift || 'none') : (kind === 'inc' ? 'before' : 'none'), err: '' };
   }
   var f = ui.item, isNew = id === 'new';
   var back = ui.itemBack || 'inout';
   var h = backHeader((isNew ? 'Add ' : 'Change ') + (kind === 'inc' ? 'money coming in' : 'a regular bill'), back);
   h += '<label class="fld">Name<input class="inp" data-bind="item.name" value="' + esc(f.name) + '" placeholder="' + (kind === 'inc' ? 'For example: Wages' : 'For example: Rent') + '"></label>';
   h += '<label class="fld">How much? (£)<input class="inp" data-bind="item.amount" inputmode="decimal" value="' + esc(f.amount) + '" placeholder="0.00"></label>';
-  h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">How often?</h2>' + seg('item.freq', [['weekly', 'Weekly'], ['fourweekly', 'Every 4 weeks'], ['monthly', 'Monthly'], ['yearly', 'Yearly']], f.freq, 2) + '</section>';
+  h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">How often?</h2>' + seg('item.freq', [['weekly', 'Weekly'], ['fourweekly', 'Every 4 weeks'], ['monthly', 'Monthly'], ['q3', 'Every 3 months'], ['yearly', 'Yearly'], ['custom', 'Something else']], f.freq, 2) +
+    (f.freq === 'custom' ? '<div class="card tight"><b>Every</b><div class="row"><input class="inp" style="width:5rem;flex:none;text-align:center" data-bind="item.n" inputmode="numeric" aria-label="How many" value="' + esc(f.n) + '"><div class="grow">' + seg('item.unit', [['weeks', 'weeks'], ['months', 'months']], f.unit) + '</div></div><span class="small muted">For example: every 2 weeks, or every 6 months.</span></div>' : '') + '</section>';
+  h += '<div data-iv="share">' + itemShareHtml(f) + '</div>';
   h += '<label class="fld">Next date it happens<span class="hint">' + (f.freq === 'monthly' ? 'It will then happen on this day each month.' : f.freq === 'weekly' ? 'It will then happen on this day each week.' : 'The app counts on from this date.') + '</span><input class="inp" type="date" data-bind="item.date" value="' + esc(f.date) + '"></label>';
   if (kind === 'inc') {
     h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">If it is due on a weekend or bank holiday, it is paid:</h2><div class="col" style="gap:.4rem">' + SHIFTS.map(function (x) {
       return '<button type="button" class="choice" style="justify-content:flex-start;text-align:left;padding:.6rem .85rem" data-act="pick" data-group="item.shift" data-val="' + x[0] + '" aria-pressed="' + (f.shift === x[0]) + '">' + x[1] + '</button>';
     }).join('') + '</div>';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(f.date)) {
-      var pdt = parseISO(f.date), tmp = { id: id === 'new' ? null : id, freq: f.freq, day: pdt.getDate(), weekday: pdt.getDay(), start: f.date, shift: f.shift };
-      var np = nextPayInfoFor(tmp, today());
-      if (np) h += '<div class="card soft tight"><b>Next payment: ' + longDate(np.actual) + '</b>' + (sameDay(np.nominal, np.actual) ? '' : '<span class="small">Moved from ' + longDate(np.nominal) + ', because ' + moveReason(tmp, np.nominal, np.actual) + '.</span>') + '</div>';
-    }
+    h += '<div data-iv="next" data-id="' + id + '">' + itemNextHtml(f, id) + '</div>';
     h += '</section>';
   }
   if (f.err) h += '<p class="err" role="alert">' + f.err + '</p>';
   h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="saveItem" data-kind="' + kind + '" data-id="' + id + '">Save</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelItem" data-kind="' + kind + '" data-id="' + id + '">Delete this</button>') + '</div>';
   return h;
 }
+/* turn the form's choice into the stored freq (+ n) */
+function itemFreq(f) {
+  if (f.freq === 'q3') return { freq: 'nmonths', n: 3 };
+  if (f.freq === 'custom') {
+    var n = parseInt(f.n, 10), max = f.unit === 'weeks' ? 52 : 12;
+    if (!(n >= 1 && n <= max)) return null;
+    if (n === 1) return { freq: f.unit === 'weeks' ? 'weekly' : 'monthly' };
+    if (f.unit === 'weeks' && n === 4) return { freq: 'fourweekly' };
+    if (f.unit === 'months' && n === 12) return { freq: 'yearly' };
+    return { freq: f.unit === 'weeks' ? 'nweeks' : 'nmonths', n: n };
+  }
+  return { freq: f.freq };
+}
+function itemShareHtml(f) {
+  var fr = itemFreq(f);
+  if (!fr || fr.freq === 'weekly' || fr.freq === 'monthly' || !(num(f.amount) > 0)) return '';
+  return '<div class="card soft tight small">' + ic('info', 18) + ' <span>About <b>' + money2(perMonth(num(f.amount), fr.freq, fr.n)) + ' a month</b> is counted for this, so the cost is spread out.</span></div>';
+}
+function itemNextHtml(f, id) {
+  var fr = itemFreq(f);
+  if (!fr || !/^\d{4}-\d{2}-\d{2}$/.test(f.date)) return '';
+  var pdt = parseISO(f.date), tmp = { id: id === 'new' ? null : id, freq: fr.freq, n: fr.n, day: pdt.getDate(), weekday: pdt.getDay(), start: f.date, shift: f.shift };
+  var np = nextPayInfoFor(tmp, today());
+  if (!np) return '';
+  return '<div class="card soft tight"><b>Next payment: ' + longDate(np.actual) + '</b>' + (sameDay(np.nominal, np.actual) ? '' : '<span class="small">Moved from ' + longDate(np.nominal) + ', because ' + moveReason(tmp, np.nominal, np.actual) + '.</span>') + '</div>';
+}
 function saveItem(kind, id) {
   var f = ui.item, amt = round2(num(f.amount));
   if (!f.name.trim()) { f.err = 'Please type a name.'; render(); return; }
   if (!(amt > 0)) { f.err = 'Please type how much.'; render(); return; }
+  var fr = itemFreq(f);
+  if (!fr) { f.err = 'Please type a number from 1 to ' + (f.unit === 'weeks' ? '52' : '12') + ' for how often.'; render(); return; }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(f.date)) f.date = iso(today());
   var dt = parseISO(f.date), list = kind === 'inc' ? S.incomes : S.bills;
-  var data = { name: f.name.trim(), amount: amt, freq: f.freq, day: dt.getDate(), weekday: dt.getDay(), start: f.date };
+  var data = { name: f.name.trim(), amount: amt, freq: fr.freq, n: fr.n || null, day: dt.getDate(), weekday: dt.getDay(), start: f.date };
   if (kind === 'inc') data.shift = f.shift || 'none';
   if (id === 'new') { data.id = uid(); data.category = kind === 'inc' ? 'Wages' : 'Bills'; list.push(data); }
   else list.forEach(function (x) { if (x.id === id) Object.keys(data).forEach(function (k) { x[k] = data[k]; }); });
@@ -1568,7 +1614,7 @@ var HELP = {
   pots: ['About savings pots', [['Jars', 'Show how full each pot is.'], ['Each month', 'This amount is set aside on pay day, like a bill.'], ['Tap a pot', 'To put money in, take money out, or change it.']]],
   pot: ['About this pot', [['Put money in', 'Moves money from my spending money into the pot.'], ['Take money out', 'Moves money from the pot back into my spending money.']]],
   streak: ['About good days', [['A good day', 'My spending was at or under the black line that day.'], ['Days in a row', 'Starts again after a day that went over. The good days still count.']]],
-  item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly or yearly.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
+  item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly, every 3 months or yearly. “Something else” is for any other number of weeks or months.'], ['Spread out', 'For things that are not monthly, the app sets aside a share every month.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
   leftover: ['About sharing out', [['Type the amounts', 'Put some in each pot, some in spending money, or leave some where it is.'], ['The rest', 'Fills that box with whatever has not been shared yet.'], ['Real money', 'The app only keeps track. Move the money in my banking app too.']]],
   reminders: ['About reminders', [['Where they show', 'On the Today screen when I open the app.'], ['0% deals', 'I get a reminder a month before a 0% deal ends.']]],
   checkin: ['About the weekly check-in', [['Four steps', 'Add anything I forgot, check card balances, look at next week’s bills, see how the week went.'], ['When', 'The Today screen reminds me on my check-in day.']]],
@@ -1594,7 +1640,7 @@ function confirmSheet() {
 var SETUP_STEPS = [['Money coming in', 'Wages, benefits, anything regular'], ['Regular bills', 'Rent, council tax, energy, phone…'], ['Cards, store accounts & debts', 'Credit cards, store cards, loans, money owed'], ['Savings pots', 'Optional · can be done later'], ['My spending money', 'Worked out from the steps above'], ['Calm settings & PIN', 'Text size, colours, warnings, PIN lock']];
 function setupSub(i) {
   if (i === 0) return S.incomes.length ? S.incomes.length + ' added' : SETUP_STEPS[0][1];
-  if (i === 1) return S.bills.length ? S.bills.length + ' added · ' + money0(S.bills.reduce(function (s, b) { return s + perMonth(b.amount, b.freq); }, 0)) + ' a month' : SETUP_STEPS[1][1];
+  if (i === 1) return S.bills.length ? S.bills.length + ' added · ' + money0(S.bills.reduce(function (s, b) { return s + perMonth(b.amount, b.freq, b.n); }, 0)) + ' a month' : SETUP_STEPS[1][1];
   if (i === 2) return (S.accounts.length + S.debts.length) ? (S.accounts.length + S.debts.length) + ' added' : SETUP_STEPS[2][1];
   if (i === 3) return S.pots.length ? S.pots.length + ' added' : SETUP_STEPS[3][1];
   return SETUP_STEPS[i][1];
@@ -2225,8 +2271,8 @@ function exportCSV() {
   var rows = [['Date', 'In or out', 'Amount', 'Category', 'Name', 'Paid with', 'Planned']];
   S.tx.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; }).forEach(function (t) { rows.push([t.date, t.type, t.amount.toFixed(2), t.category, t.name, t.type === 'out' ? paidWithName(t.paidWith) : '', t.planned ? 'yes' : 'no']); });
   rows.push([]); rows.push(['Regular', 'In or out', 'Amount', 'How often', 'Name']);
-  S.incomes.forEach(function (i) { rows.push([freqText(i), 'in', i.amount.toFixed(2), FREQS[i.freq], i.name]); });
-  allBills().forEach(function (b) { rows.push([freqText(b), 'out', b.amount.toFixed(2), FREQS[b.freq], b.name]); });
+  S.incomes.forEach(function (i) { rows.push([freqText(i), 'in', i.amount.toFixed(2), freqLabel(i), i.name]); });
+  allBills().forEach(function (b) { rows.push([freqText(b), 'out', b.amount.toFixed(2), freqLabel(b), b.name]); });
   rows.push([]); rows.push(['Card', 'Owed', 'Limit', 'APR %', 'Monthly interest (estimate)']);
   S.accounts.forEach(function (a) { rows.push([a.name, (a.balance || 0).toFixed(2), (a.limit || 0).toFixed(2), a.apr || '', monthlyInterest(a).toFixed(2)]); });
   rows.push([]); rows.push(['Debt', 'Type', 'Owed to', 'Owed', 'Started at', 'APR %', 'Monthly payment', 'Monthly interest (estimate)']);
@@ -2290,6 +2336,11 @@ document.addEventListener('input', function (e) {
   ui[p[0]][p[1]] = e.target.value;
   if (p[0] === 'buy' && ui.buy && ui.buy.result) { ui.buy.result = null; }
   if (p[0] === 'left') { ui.left.err = ''; updateLeftSummary(); }
+  if (p[0] === 'item' && (p[1] === 'n' || p[1] === 'amount')) {
+    var sh = document.querySelector('[data-iv="share"]'), nx = document.querySelector('[data-iv="next"]');
+    if (sh) sh.innerHTML = itemShareHtml(ui.item);
+    if (nx) nx.innerHTML = itemNextHtml(ui.item, nx.getAttribute('data-id'));
+  }
   if ((p[0] === 'card' || p[0] === 'debt') && /^(name|owedTo|balance)$/.test(p[1])) {
     var f = ui[p[0]], tEl = document.querySelector('[data-pv="title"]'), oEl = document.querySelector('[data-pv="owed"]');
     if (tEl) tEl.textContent = p[0] === 'card' ? (f.name || 'Name') : (f.name || f.owedTo || debtType(f.type)[1]);

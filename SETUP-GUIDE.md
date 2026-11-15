@@ -81,6 +81,5 @@ When I send you a new version:
 - **Reminders:** these show on the Today screen when she opens the app. The app can't send pop-up notifications.
 - **New phone:** install the app on the new phone, then use **Backup & privacy → Restore from a backup**.
 - **PIN lock:** this stops rules and limits being changed by accident. It isn't strong security. Anyone holding her unlocked phone could still see her figures.
-- **Bank balance:** the app can't see her bank. She types her balance once (Today → "Add my bank balance"), the app estimates it from then on, and the weekly check-in asks her to confirm or correct it. Money in pots and the ISA is not counted in it.
 - **Pay days and bank holidays:** each income can be set to arrive the working day before or after a weekend or bank holiday. The app includes the official UK bank holiday dates up to the end of 2028 and warns when it needs a newer version.
 - **Interest figures:** these are estimates (balance × APR ÷ 12). Statements can differ a little.

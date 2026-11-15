@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.6.2';
+var APP_VERSION = '1.7.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -285,6 +285,7 @@ function defaultState() {
     },
     payOverrides: {},          // 'incomeId|nominal date' -> actual date (pay came early or late)
     payLate: null, leftoverDone: {}, shiftNoteDone: false,
+    bankCheck: null,          // {bank, cash, date, at} – the last time she checked her real balance
     lastWarn: null, lastBackup: null, lastCheckIn: null, lastHelperSend: null
   };
 }
@@ -558,6 +559,64 @@ function extrasInfo(d) {
   var list = txInPeriod(period(d || today())).filter(function (t) { return t.type === 'out' && t.planned === false; });
   return { list: list, count: list.length, total: round2(list.reduce(function (s, t) { return s + t.amount; }, 0)) };
 }
+/* every new money record gets the time it was added, so the bank estimate knows what came after a check */
+function pushTx(t) { t.created = Date.now(); S.tx.push(t); return t; }
+
+/* ---------- bank balance and cash (estimates) ----------
+   She types her real balance now and then. From that point the app adds what it knows:
+   regular money in, bills and card/debt payments on their dates, pot amounts on pay day,
+   and everything she adds. Credit card spending does not touch the bank. Pot money is outside the bank. */
+function potMonthlyTotal() { return S.pots.reduce(function (s, p) { return s + (p.monthly || 0); }, 0); }
+function bankEstimate(d) {
+  var ck = S.bankCheck; if (!ck) return null;
+  d = d || today();
+  var bank = ck.bank, cash = ck.cash || 0, mi = mainIncome(), potM = potMonthlyTotal();
+  for (var x = addDays(parseISO(ck.date), 1), g = 0; x <= d && g < 800; x = addDays(x, 1), g++) {
+    S.incomes.forEach(function (i) { if (occursOn(i, x)) bank += i.amount; });
+    allBills().forEach(function (b) { if (occursOn(b, x)) bank -= b.amount; });
+    if (mi && potM > 0 && occursOn(mi, x)) bank -= potM;
+  }
+  var dIso = iso(d);
+  S.tx.forEach(function (t) {
+    if (!(t.created > ck.at) || t.date > dIso) return;
+    if (t.type === 'in') { if (!t.noBank && t.name !== 'Left over from last money month') bank += t.amount; }
+    else if (t.type === 'out') { if (t.paidWith === 'cash') cash -= t.amount; else if (!t.paidWith || t.paidWith === 'bank') bank -= t.amount; }
+    else if (t.type === 'cash') { bank -= t.amount; cash += t.amount; }
+    else if (t.type === 'bank') bank += t.delta || 0;
+  });
+  return { bank: round2(bank), cash: round2(cash), date: parseISO(ck.date), days: diffDays(parseISO(ck.date), d) };
+}
+/* regular money due later in this money month (already counted in the spending money) */
+function moneyToCome(d) {
+  d = d || today();
+  var pr = period(d), out = [];
+  for (var x = addDays(d, 1); iso(x) <= pr.endIso; x = addDays(x, 1)) {
+    S.incomes.forEach(function (i) { if (occursOn(i, x)) out.push({ name: i.name, amount: i.amount, date: x }); });
+  }
+  return { list: out, total: round2(out.reduce(function (s, o) { return s + o.amount; }, 0)) };
+}
+function billsToCome(d) {
+  d = d || today();
+  var pr = period(d), out = [];
+  for (var x = addDays(d, 1); iso(x) <= pr.endIso; x = addDays(x, 1)) {
+    allBills().forEach(function (b) { if (!isSpread(b) && occursOn(b, x)) out.push({ name: b.name, amount: b.amount, date: x }); });
+  }
+  return { list: out, total: round2(out.reduce(function (s, o) { return s + o.amount; }, 0)) };
+}
+function cardSpendThisMonth(d) {
+  d = d || today();
+  var list = txInPeriod(period(d)).filter(function (t) { return t.type === 'out' && t.date <= iso(d) && acct(t.paidWith); });
+  return round2(list.reduce(function (s, t) { return s + t.amount; }, 0));
+}
+function breakdown(d) {
+  d = d || today();
+  var est = bankEstimate(d), c = calc(d); if (!est) return null;
+  var come = moneyToCome(d), bills = billsToCome(d), card = cardSpendThisMonth(d);
+  var spread = round2(S.bills.filter(isSpread).reduce(function (s, b) { return s + setAside(b, d).saved; }, 0));
+  var explained = round2(est.bank + est.cash + come.total - bills.total - spread - card);
+  return { est: est, come: come, bills: bills, card: card, spread: spread, explained: explained, left: round2(c.left), diff: round2(c.left - explained) };
+}
+
 function txInMonth(d) { return txInPeriod(period(d)); }
 
 /* The main calculation behind Today, warnings and "Should I buy it?" */
@@ -569,6 +628,7 @@ function calc(d) {
   S.tx.forEach(function (t) {
     if (t.date < pr.startIso || t.date > pr.endIso) return;
     if (t.type === 'in') { inMonth += t.amount; return; }
+    if (t.type !== 'out') return;           // cash withdrawals and bank-only moves are not spending
     if (t.date > dIso) return;
     spent += t.amount;
     if (t.date < dIso) spentBefore += t.amount; else spentToday += t.amount;
@@ -973,7 +1033,7 @@ function vToday() {
   h += '<section class="card"><span class="muted">You can spend today</span><span class="big">' + money2(c.todayLeft) + '</span>' +
     (c.spentToday > 0 ? '<span class="small muted">Spent so far today: ' + money2(c.spentToday) + '</span>' : '') +
     '<div class="grid2"><div class="tile"><span class="l">Left this week</span><span class="v">' + money0(c.weekLeft) + '</span></div>' +
-    '<div class="tile"><span class="l">Left this month</span><span class="v">' + money0(c.left) + '</span></div></div></section>';
+    '<div class="tile"><span class="l">Left this month</span><span class="v">' + money0(c.left) + '</span></div></div>' + bankLines(d) + '</section>';
   h += '<section class="card"><div class="row between"><b>Spending money this month</b><span class="muted">' + money0(c.budget) + '</span></div>' +
     (startDay() !== 1 ? '<span class="small muted" style="margin-top:-.4rem">' + periodLabel(c.period) + '</span>' : '') + '<div role="img" aria-label="Used ' + Math.round(used) + ' percent. The black line shows where you should be by today.">' + bar(used, STATUS_FILL[c.status], '', c.lineFrac * 100) + '</div>' +
     '<div class="row between small muted"><span>Used ' + money0(c.spent) + ' (' + Math.round(c.usedFrac * 100) + '%)</span><span>Black line = where I should be today</span></div>' + (function () {
@@ -995,6 +1055,16 @@ function vToday() {
   return h;
 }
 
+function bankLines(d) {
+  var est = bankEstimate(d), come = moneyToCome(d), h = '';
+  var row = 'display:flex;align-items:center;gap:.5rem;text-decoration:none;color:var(--ink);min-height:2.75rem;border-top:1px solid var(--track);padding-top:.5rem';
+  if (come.total > 0) h += '<a href="#balance" style="' + row + '">' + ic('clock', 18) + '<span class="grow small">“Left this month” includes <b>' + money0(come.total) + '</b> not here yet</span>' + ic('next', 16) + '</a>';
+  if (!est) return h + '<a href="#balance" style="' + row + '">' + ic('home', 18) + '<span class="grow small"><b>Add my bank balance</b> so I can see what my bank should show</span>' + ic('next', 16) + '</a>';
+  var old = est.days >= 14;
+  h += '<a href="#balance" style="' + row + '">' + ic('home', 18) + '<span class="grow small">Bank: about <b>' + money0(est.bank) + '</b> · Cash: about <b>' + money0(est.cash) + '</b><br><span class="' + (old ? 'warn-ink' : 'muted') + '">' + (old ? 'Checked ' + est.days + ' days ago – time to check' : 'Checked ' + (est.days === 0 ? 'today' : est.days === 1 ? 'yesterday' : dayMonth(est.date))) + '</span></span>' + ic('next', 16) + '</a>';
+  return h;
+}
+
 /* ---------- Add money in or out ---------- */
 function newAdd(back) { return { type: 'out', cat: 'Food shop', freq: 'once', paidWith: 'bank', planned: 'yes', date: iso(today()), amount: '', name: '', back: back || 'today', err: '' }; }
 function vAdd() {
@@ -1002,8 +1072,16 @@ function vAdd() {
   var a = ui.add, cats = a.type === 'out' ? CATS_OUT : CATS_IN;
   if (!cats.some(function (c) { return c[0] === a.cat; })) a.cat = cats[0][0];
   var h = '<header class="hdr"><h1 style="font-size:1.5rem">Add money in or out</h1><div class="tools"><button class="round q" data-act="help" aria-label="Help for this screen">?</button><a href="#' + a.back + '" data-act="cancelAdd" style="min-height:2.75rem;display:flex;align-items:center">Cancel</a></div></header>';
-  h += '<div class="grid2"><button type="button" class="choice solid" data-act="pick" data-group="add.type" data-val="in" aria-pressed="' + (a.type === 'in') + '">' + ic('down', 22) + 'Money in</button>' +
-    '<button type="button" class="choice solid" data-act="pick" data-group="add.type" data-val="out" aria-pressed="' + (a.type === 'out') + '">' + ic('up', 22) + 'Money out</button></div>';
+  h += '<div class="grid3"><button type="button" class="choice solid" style="flex-direction:column;gap:.15rem" data-act="pick" data-group="add.type" data-val="in" aria-pressed="' + (a.type === 'in') + '">' + ic('down', 22) + 'Money in</button>' +
+    '<button type="button" class="choice solid" style="flex-direction:column;gap:.15rem" data-act="pick" data-group="add.type" data-val="out" aria-pressed="' + (a.type === 'out') + '">' + ic('up', 22) + 'Money out</button>' +
+    '<button type="button" class="choice solid" style="flex-direction:column;gap:.15rem" data-act="pick" data-group="add.type" data-val="cash" aria-pressed="' + (a.type === 'cash') + '">' + svg('<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/>', 22) + 'Took out cash</button></div>';
+  if (a.type === 'cash') {
+    h += '<label class="amountbox"><span class="lab">How much cash did I take out?</span><span class="amountrow">£<input class="inp amount" id="add-amount" data-bind="add.amount" inputmode="decimal" autocomplete="off" placeholder="0.00" value="' + esc(a.amount) + '"></span></label>';
+    if (a.err) h += '<p class="err" role="alert">' + a.err + '</p>';
+    h += '<label class="fld">When?<input class="inp" type="date" data-bind="add.date" value="' + esc(a.date) + '"></label>';
+    h += '<div class="card soft small"><div class="row top">' + ic('info', 20) + '<span>This moves money from my bank to my purse or wallet. It is not spending. When I spend the cash, I add it as Money out and choose “Cash”.</span></div></div>';
+    return h + '<button class="btn push" data-act="saveAdd">Save</button>';
+  }
   h += '<label class="amountbox"><span class="lab">How much?</span><span class="amountrow">£<input class="inp amount" id="add-amount" data-bind="add.amount" inputmode="decimal" autocomplete="off" placeholder="0.00" value="' + esc(a.amount) + '"></span></label>';
   if (a.err) h += '<p class="err" role="alert">' + a.err + '</p>';
   h += '<section class="col" style="gap:.5rem"><h2 class="sec-title">What is it for?</h2><div class="grid3">' + cats.map(function (c) {
@@ -1030,10 +1108,14 @@ function saveAdd() {
   if (!(amt > 0)) { a.err = 'Please type how much, for example 12.50'; render(); return; }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(a.date)) a.date = iso(today());
   if (a.freq !== 'once' && needPin('saveAdd')) return;
+  if (a.type === 'cash') {
+    pushTx({ id: uid(), date: a.date, type: 'cash', amount: amt, category: 'Cash', name: 'Took out cash', paidWith: null, planned: true });
+    save(); var bk = a.back; ui.add = null; toast(money2(amt) + ' moved from bank to cash'); go(bk); return;
+  }
   var name = (a.name || '').trim() || a.cat;
   if (a.freq === 'once') {
     var t = { id: uid(), date: a.date, type: a.type, amount: amt, category: a.cat, name: name, paidWith: a.type === 'out' ? a.paidWith : null, planned: a.type === 'out' ? a.planned === 'yes' : true };
-    S.tx.push(t);
+    pushTx(t);
     if (t.type === 'out') { var ac = acct(t.paidWith); if (ac) ac.balance = round2((ac.balance || 0) + amt); }
   } else {
     var dt = parseISO(a.date);
@@ -1085,7 +1167,7 @@ function vInOut() {
       void tot;
     }
     h += '<section class="list">' + (list.length ? list.map(function (t) {
-      var tag = t.type === 'in' ? '<span class="flag ok-ink">' + ic('down', 16) + 'In</span>' : (t.planned ? '' : '<span class="tiny" style="background:var(--warn-bg);color:var(--warn-ink);border-radius:.4rem;padding:.15rem .45rem;font-weight:700">Extra</span>');
+      var tag = t.type === 'cash' ? '<span class="tiny muted">Bank → cash</span>' : t.type === 'bank' ? '<span class="tiny muted">From bank</span>' : t.type === 'in' ? '<span class="flag ok-ink">' + ic('down', 16) + 'In</span>' : (t.planned ? '' : '<span class="tiny" style="background:var(--warn-bg);color:var(--warn-ink);border-radius:.4rem;padding:.15rem .45rem;font-weight:700">Extra</span>');
       return '<button type="button" class="item" data-act="txMenu" data-id="' + t.id + '"><span class="ico-box">' + catIcon(t.category, 22) + '</span><span class="grow col"><span class="name">' + esc(t.name) + '</span><span class="meta">' + shortDate(parseISO(t.date)) + (t.type === 'out' ? ' · ' + esc(paidWithName(t.paidWith)) : '') + '</span></span>' + tag + '<span class="amt">' + money2(t.amount) + '</span></button>';
     }).join('') : '<p class="muted">Nothing added this month yet. Tap + to add.</p>') + '</section>';
   }
@@ -1494,31 +1576,33 @@ function vReminders() {
 function weekStart(d) { return addDays(d, -((d.getDay() + 6) % 7)); }
 
 function vCheckIn() {
-  var d = today(), step = ui.ciStep, labels = ['Add anything I forgot', 'Check what I owe', 'Next week’s bills', 'How my week went'];
+  var d = today(), step = ui.ciStep, labels = ['Add anything I forgot', 'Check my bank and cash', 'Check what I owe', 'Next week’s bills', 'How my week went'];
   var h = header('Weekly check-in', DAY_NAMES[S.settings.checkInDay] + 's · about 5 minutes');
-  if (step >= 4) {
+  if (step >= 5) {
     h += '<section class="card ok" style="align-items:center;text-align:center">' + sig('ok', 64) + '<b style="font-size:1.4rem" class="ok-ink">Check-in done</b><span>Well done. See you next ' + DAY_NAMES[S.settings.checkInDay] + '.</span></section>';
     h += '<button class="btn sec" data-act="backup">' + ic('dl', 20) + 'Make a backup now</button>';
     if (S.settings.helper.weekly) h += '<button class="btn sec" data-act="sendSummary">' + ic('share', 20) + 'Send my helper a summary</button>';
     h += '<a class="btn push" href="#today">Finish</a>';
     return h;
   }
-  h += '<ol class="grid4" style="list-style:none;margin:0;padding:0">' + labels.map(function (l, i) {
+  h += '<ol style="list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.35rem">' + labels.map(function (l, i) {
     return '<li class="col" style="gap:.35rem"><span style="height:.5rem;border-radius:.25rem;background:' + (i < step ? 'var(--ok)' : i === step ? 'var(--primary)' : 'var(--line)') + '"></span><span class="tiny" style="' + (i === step ? 'color:var(--primary);font-weight:700' : 'color:var(--muted)') + '">' + l + '</span></li>';
   }).join('') + '</ol>';
-  h += '<section class="card"><span class="small muted">Step ' + (step + 1) + ' of 4</span>';
+  h += '<section class="card"><span class="small muted">Step ' + (step + 1) + ' of 5</span>';
   var ws = weekStart(d);
   if (step === 0) {
     var wk = S.tx.filter(function (t) { return t.date >= iso(addDays(d, -7)) && t.date <= iso(d); }).sort(function (a, b) { return a.date < b.date ? 1 : -1; });
     h += '<h2 style="font-size:1.3rem">Is there anything I forgot to add this week?</h2>' + (wk.length ? '<div class="list">' + wk.map(function (t) { return '<div class="row between small"><span>' + shortDate(parseISO(t.date)) + ' · ' + esc(t.name) + '</span><b>' + money2(t.amount) + '</b></div>'; }).join('') + '</div>' : '<span class="muted">Nothing added in the last 7 days.</span>') +
       '<button class="btn sm sec" data-act="ciAdd">' + ic('plus', 18) + 'Add something I forgot</button>';
   } else if (step === 1) {
+    h += balanceCheckHtml('checkin');
+  } else if (step === 2) {
     h += '<h2 style="font-size:1.3rem">Do these balances match my statements and apps?</h2>' + (allOwed().length ? allOwed().filter(function (a) { return a.limit !== undefined || a.balance > 0; }).map(function (a) {
       var ok = ui.ciOk && ui.ciOk[a.id];
       return '<div class="row" style="border-top:1px solid var(--track);padding-top:.6rem"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><b>' + esc(a.limit !== undefined ? a.name : debtTitle(a)) + '</b><span class="small">' + money2(a.balance || 0) + ' owed</span></span>' +
         (ok ? '<span class="flag ok-ink">' + sig('ok', 20) + 'Matches</span>' : '<button class="btn sm sec" style="width:auto" data-act="ciMatch" data-id="' + a.id + '">Yes</button><button class="btn sm ghost" style="width:auto" data-act="ciChange" data-id="' + a.id + '">Change</button>') + '</div>';
     }).join('') : '<span class="muted">No cards or debts added.</span>');
-  } else if (step === 2) {
+  } else if (step === 3) {
     var nx = upcomingBills(addDays(d, 1), 7);
     var tot = nx.reduce(function (s, u) { return s + u.b.amount; }, 0);
     h += '<h2 style="font-size:1.3rem">Bills in the next 7 days</h2>' + (nx.length ? nx.map(function (u) { return '<div class="row between"><span>' + shortDate(u.d) + ' · ' + esc(u.b.name) + '</span><b>' + money(u.b.amount) + '</b></div>'; }).join('') + '<span class="flag ok-ink">' + sig('ok', 18) + money(tot) + ' – already set aside</span>' : '<span class="muted">No bills in the next 7 days.</span>');
@@ -1528,7 +1612,7 @@ function vCheckIn() {
     var spent = 0; for (var j = 0; j < 7; j++) { var y = addDays(ws, j); if (y <= d) spent += spentOn(iso(y)); }
     h += '<h2 style="font-size:1.3rem">How my week went</h2>' + (total ? '<span class="mid">' + good + ' of ' + total + ' good days</span>' : '') + '<span>Spent this week: <b>' + money2(spent) + '</b></span><span class="small muted">A good day is when my spending is at or under the black line.</span>';
   }
-  h += '</section><div class="btnrow one-two push"><button class="btn ghost" data-act="ciBack"' + (step === 0 ? ' disabled' : '') + '>Back</button><button class="btn" data-act="ciNext">' + (step === 3 ? 'Finish check-in' : 'Next: ' + labels[step + 1].toLowerCase()) + '</button></div>';
+  h += '</section><div class="btnrow one-two push"><button class="btn ghost" data-act="ciBack"' + (step === 0 ? ' disabled' : '') + '>Back</button><button class="btn" data-act="ciNext">' + (step === 4 ? 'Finish check-in' : 'Next: ' + labels[step + 1].charAt(0).toLowerCase() + labels[step + 1].slice(1)) + '</button></div>';
   return h;
 }
 
@@ -1658,7 +1742,7 @@ function vTour(n) {
 /* ---------- Help ("?") ---------- */
 var HELP = {
   today: ['About the Today screen', [['The big number', 'How much I can spend today. My bills and savings are already taken off.'], ['Left this week and this month', 'The same money, shown for the rest of the week and the rest of the month.'], ['The bar', 'How much spending money I have used. The black line shows where I should be by today.'], ['The signal at the top', 'Green circle: on track. Amber triangle: slow down. Red octagon: stop spending on extras.'], ['Coming out soon', 'Bills due in the next 7 days. The first 3 show – tap “Show all” to see the rest.']]],
-  add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['Was this in my plan?', 'Choose “No, an extra” for anything I had not planned, like a treat. It still comes out of my spending money the same way. It lets me see how much went on extras this month.']]],
+  add: ['Adding money in or out', [['Money in, money out or cash', 'Choose which one first. “Took out cash” is for taking money out of the bank – it is not spending.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['Was this in my plan?', 'Choose “No, an extra” for anything I had not planned, like a treat. It still comes out of my spending money the same way. It lets me see how much went on extras this month.']]],
   inout: ['About Money in & out', [['Counts as … a month', 'For things that are not monthly, this is the share counted each month.'], ['Set aside bar', 'For bills that come less often than monthly: how much has built up towards the next one.'], ['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it. Extras have an amber “Extra” tag.']]],
   calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.'], ['Bills that are not monthly', 'They show the full amount on the day they go out, and how much is counted for them each month.']]],
   cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],
@@ -1673,10 +1757,11 @@ var HELP = {
   pot: ['About this pot', [['Put money in', 'Moves money from my spending money into the pot.'], ['Take money out', 'Moves money from the pot back into my spending money.']]],
   streak: ['About good days', [['A good day', 'My spending was at or under the black line that day.'], ['Days in a row', 'Starts again after a day that went over. The good days still count.']]],
   item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly, every 3 months or yearly. “Something else” is for any other number of weeks or months.'], ['Spread out', 'For things that are not monthly, the app sets aside a share every month.'], ['Set aside so far', 'The bar shows how much has built up towards the next payment. That money is in my bank account – it should not be spent.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
+  balance: ['About my bank and cash', [['Estimates', 'The app cannot see my bank. It starts from the balance I typed and adds what I have added since.'], ['Checking', 'Each week the check-in asks me to compare it with my banking app.'], ['Why it is different', 'The table shows each reason my bank balance and “Left this month” are not the same.'], ['Pots', 'Money in pots and my ISA is not in the bank balance.']]],
   extras: ['About my extras', [['What counts', 'Anything I marked “No, an extra” when I added it.'], ['Why it helps', 'It shows how much went on things I had not planned, and what they were for.']]],
   leftover: ['About sharing out', [['Type the amounts', 'Put some in each pot, some in spending money, or leave some where it is.'], ['The rest', 'Fills that box with whatever has not been shared yet.'], ['Real money', 'The app only keeps track. Move the money in my banking app too.']]],
   reminders: ['About reminders', [['Where they show', 'On the Today screen when I open the app.'], ['0% deals', 'I get a reminder a month before a 0% deal ends.']]],
-  checkin: ['About the weekly check-in', [['Four steps', 'Add anything I forgot, check card balances, look at next week’s bills, see how the week went.'], ['When', 'The Today screen reminds me on my check-in day.']]],
+  checkin: ['About the weekly check-in', [['Five steps', 'Add anything I forgot, check my bank and cash, check what I owe, look at next week’s bills, see how the week went.'], ['When', 'The Today screen reminds me on my check-in day.']]],
   settings: ['About settings', [['Text size and colours', 'Change how the app looks.'], ['Warnings', 'Full screen, or a box on the Today screen.'], ['My money month', 'The day my spending money starts again each month. Usually my pay day.']]],
   helper: ['About my trusted helper', [['Summary', 'I choose what to send and who to send it to.'], ['PIN', 'Stops my rules and limits being changed by accident.']]],
   privacy: ['About backup and privacy', [['On this phone', 'Everything is saved on this phone only.'], ['Backup', 'Saves a file. Keep it somewhere safe, like email or cloud storage.'], ['Restore', 'Puts a backup file back. It replaces what is on this phone.']]],
@@ -1986,6 +2071,60 @@ function vExtras() {
   return h;
 }
 
+/* ---------- bank balance, cash and why it differs from "Left this month" ---------- */
+function balanceCheckHtml(from) {
+  var est = bankEstimate();
+  if (!ui.bal) ui.bal = { bank: est ? est.bank.toFixed(2) : '', cash: est ? Math.max(0, est.cash).toFixed(2) : '', err: '' };
+  var f = ui.bal, h = '';
+  if (est) {
+    h += '<h2 style="font-size:1.25rem">Does my banking app show about ' + money2(est.bank) + '?</h2>' +
+      '<span class="small muted">And do I have about ' + money2(est.cash) + ' in cash?</span>' +
+      '<button class="btn sm" data-act="balRight" data-from="' + from + '">' + sig('ok', 20) + 'Yes, both about right</button>' +
+      '<span class="small" style="font-weight:700;margin-top:.3rem">If not, type what they really are:</span>';
+  } else {
+    h += '<h2 style="font-size:1.25rem">What does my banking app show right now?</h2><span class="small muted">Use the main account my pay goes into. Do not include pots or savings kept separately.</span>';
+  }
+  h += '<div class="grid2"><label class="fld">Bank balance (£)<input class="inp" data-bind="bal.bank" inputmode="decimal" value="' + esc(f.bank) + '"></label>' +
+    '<label class="fld">Cash I have (£)<input class="inp" data-bind="bal.cash" inputmode="decimal" value="' + esc(f.cash) + '" placeholder="0"></label></div>' +
+    '<span class="tiny muted">If my balance is overdrawn, put a minus sign in front, for example −50.</span>' +
+    (f.err ? '<p class="err" role="alert">' + f.err + '</p>' : '') +
+    '<button class="btn sm sec" data-act="balSave" data-from="' + from + '">Save these</button>';
+  return h;
+}
+function vBalance() {
+  var d = today(), b = breakdown(d), h = backHeader('My bank and cash', 'today');
+  if (!b) {
+    h += '<p class="muted">The app cannot see my bank. If I type my balance now, it will keep an estimate up to date and ask me to check it each week.</p>';
+    h += '<section class="card">' + balanceCheckHtml('balance') + '</section>';
+    var come0 = moneyToCome(d);
+    if (come0.list.length) h += stillToComeHtml(come0);
+    return h;
+  }
+  var e = b.est, old = e.days >= 14;
+  h += '<section class="grid2"><div class="card tight"><span class="small muted">Bank (about)</span><span class="mid">' + money2(e.bank) + '</span></div><div class="card tight"><span class="small muted">Cash (about)</span><span class="mid">' + money2(e.cash) + '</span></div></section>';
+  h += '<span class="small ' + (old ? 'warn-ink' : 'muted') + '" style="margin-top:-.4rem">' + (old ? sig('warn', 14) + ' ' : '') + 'Last checked ' + longDate(e.date) + '. These are estimates from what I have added.</span>';
+  function line(sign, label, amt, sub) { return '<div class="row between" style="padding:.35rem 0;border-top:1px solid var(--track)"><span class="col"><span>' + (sign ? '<b>' + sign + '</b> ' : '') + label + '</span>' + (sub ? '<span class="tiny muted">' + sub + '</span>' : '') + '</span><b style="white-space:nowrap">' + money2(amt) + '</b></div>'; }
+  h += '<section class="card" style="gap:0"><h2 style="margin-bottom:.4rem">Why “Left this month” is different</h2>' +
+    line('', 'Bank balance (about)', e.bank) + line('+', 'Cash I have', e.cash) +
+    line('+', 'Regular money not here yet', b.come.total, b.come.list.length ? b.come.list.length + ' payment' + (b.come.list.length === 1 ? '' : 's') + ' – see below' : '') +
+    line('−', 'Bills still to come this money month', b.bills.total, b.bills.list.length ? b.bills.list.map(function (x) { return esc(x.name); }).slice(0, 4).join(', ') + (b.bills.list.length > 4 ? '…' : '') : '') +
+    line('−', 'Built up for bills that are not monthly', b.spread) +
+    line('−', 'Credit card spending (still in my bank until the card is paid)', b.card) +
+    '<div class="row between" style="padding:.5rem 0 .2rem;border-top:2px solid var(--ink)"><b>= What my bank and cash cover</b><b>' + money2(b.explained) + '</b></div>' +
+    '<div class="row between" style="padding:.2rem 0"><b>Left this month (in the app)</b><b>' + money2(b.left) + '</b></div></section>';
+  if (Math.abs(b.diff) < 5) h += '<div class="card ok row">' + sig('ok', 26) + '<span>These add up. The app and my bank agree.</span></div>';
+  else if (b.diff > 0) h += '<div class="card warn row top">' + sig('warn', 26) + '<span class="small">The app thinks I have <b>' + money2(b.diff) + ' more</b> to spend than my bank and cash can cover. Something may not have been added, or a bill came out early. Check my banking app.</span></div>';
+  else h += '<div class="card soft row top">' + ic('info', 22) + '<span class="small">My bank and cash have <b>' + money2(-b.diff) + ' more</b> than the app counts – for example money left from earlier months, or something not added.</span></div>';
+  if (b.come.list.length) h += stillToComeHtml(b.come);
+  h += '<section class="card">' + balanceCheckHtml('balance') + '</section>';
+  h += '<p class="tiny muted">Money in my pots and ISA is not counted in the bank balance.</p>';
+  return h;
+}
+function stillToComeHtml(come) {
+  return '<section class="card"><h2>' + ic('clock', 18) + ' Money not here yet</h2><span class="small muted">Counted in “Left this month” already.</span>' +
+    come.list.map(function (x) { return '<div class="row between"><span>' + esc(x.name) + ' <span class="small muted">· ' + longDate(x.date) + '</span></span><b>' + money2(x.amount) + '</b></div>'; }).join('') + '</section>';
+}
+
 /* ===== Money Planner – router, events, actions ===== */
 
 var NAV_ROUTES = { today: 'today', inout: 'inout', calendar: 'inout', cards: 'cards', interest: 'cards', buy: 'buy', rules: 'buy', wish: 'buy', pots: 'today', streak: 'today' };
@@ -2027,6 +2166,7 @@ function resolve(r) {
     case 'debt': return { base: base, html: function () { return vDebt(parts[1]); } };
     case 'leftover': return { base: base, html: vLeftover };
     case 'extras': return { base: base, html: vExtras, nav: true };
+    case 'balance': return { base: base, html: vBalance };
     case 'fullpay': return { base: base, html: function () { return vFullPay(parts[1]); } };
     case 'card': return { base: base, html: function () { return vCard(parts[1]); } };
     case 'interest': return { base: base, html: vInterest, nav: true };
@@ -2177,14 +2317,14 @@ var ACTIONS = {
     if (!(amt > 0)) { f.err = 'Please type how much was paid.'; render(); return; }
     var rest = f.all === 'no' ? round2(num(f.rest)) : 0;
     if (f.all === 'no' && !(rest > 0)) { f.err = 'Please type how much of the bill is still not paid.'; render(); return; }
-    a.balance = round2(Math.max(0, (a.balance || 0) - amt));
+    a.balance = round2(Math.max(0, (a.balance || 0) - amt)); bankMove(-amt, a.name + ' bill paid');
     a.carried = Math.min(rest, a.balance); a.lastPaid = monthKey(today()); save(); ui.fullpay = null;
     toast(rest > 0 ? 'Saved – interest will show on ' + money2(a.carried) : 'Saved – paid in full, no interest'); go('today');
   },
   cardPay: function (el) {
     var a = acct(el.getAttribute('data-id')), amt = round2(num(ui.card && ui.card.pay));
     if (!a || !(amt > 0)) { if (ui.card) ui.card.err = 'Type the amount paid.'; render(); return; }
-    a.balance = round2(Math.max(0, (a.balance || 0) - amt)); a.lastPaid = monthKey(today());
+    a.balance = round2(Math.max(0, (a.balance || 0) - amt)); a.lastPaid = monthKey(today()); bankMove(-amt, a.name + ' payment');
     if (a.carried > 0) a.carried = round2(Math.max(0, Math.min(a.carried - amt, a.balance)));
     save();
     ui.card.balance = String(a.balance); ui.card.pay = ''; ui.card.err = ''; toast(money2(amt) + ' taken off'); render();
@@ -2193,7 +2333,7 @@ var ACTIONS = {
   debtPay: function (el) {
     var d = debt(el.getAttribute('data-id')), amt = round2(num(ui.debt && ui.debt.pay));
     if (!d || !(amt > 0)) { if (ui.debt) ui.debt.err = 'Type the amount paid.'; render(); return; }
-    d.balance = round2(Math.max(0, (d.balance || 0) - amt)); d.lastPaid = monthKey(today()); save();
+    d.balance = round2(Math.max(0, (d.balance || 0) - amt)); d.lastPaid = monthKey(today()); bankMove(-amt, debtTitle(d) + ' payment'); save();
     ui.debt.balance = String(d.balance); ui.debt.pay = ''; ui.debt.err = ''; toast(d.balance > 0 ? money2(amt) + ' taken off' : 'Paid off – well done!'); render();
   },
   askDelDebt: function (el) { ui.confirm = { title: 'Delete this debt?', text: 'It and its monthly payment will be removed from the app.', yes: 'Yes, delete', act: 'delDebt', id: el.getAttribute('data-id') }; render(); },
@@ -2210,7 +2350,7 @@ var ACTIONS = {
   buyIt: function () {
     var b = ui.buy; if (!b || !b.result) return;
     var t = { id: uid(), date: iso(today()), type: 'out', amount: b.result.price, category: 'Other', name: (b.name || '').trim() || 'Something I bought', paidWith: b.paidWith, planned: b.planned === 'yes' };
-    S.tx.push(t); var a = acct(b.paidWith); if (a) a.balance = round2((a.balance || 0) + t.amount);
+    pushTx(t); var a = acct(b.paidWith); if (a) a.balance = round2((a.balance || 0) + t.amount);
     if (b.wishId) S.wish = S.wish.filter(function (w) { return w.id !== b.wishId; });
     save(); ui.buy = null; toast('Added to my spending'); go('today');
   },
@@ -2231,7 +2371,7 @@ var ACTIONS = {
   ciMatch: function (el) { ui.ciOk = ui.ciOk || {}; ui.ciOk[el.getAttribute('data-id')] = true; render(); },
   ciChange: function (el) { var id = el.getAttribute('data-id'); ui.card = null; ui.debt = null; ui.cardBack = 'checkin'; ui.debtBack = 'checkin'; go((acct(id) ? 'card/' : 'debt/') + id); },
   ciBack: function () { ui.ciStep = Math.max(0, ui.ciStep - 1); render(); },
-  ciNext: function () { ui.ciStep++; if (ui.ciStep >= 4) { S.lastCheckIn = iso(today()); save(); ui.ciOk = {}; } render(); },
+  ciNext: function () { ui.ciStep++; if (ui.ciStep >= 5) { S.lastCheckIn = iso(today()); save(); ui.ciOk = {}; } render(); },
   sendSummary: function () {
     var text = summaryText();
     S.lastHelperSend = iso(today()); save();
@@ -2265,12 +2405,12 @@ var ACTIONS = {
   payStillLate: function () { if (S.payLate) S.payOverrides[S.payLate] = iso(addDays(today(), 1)); save(); toast('OK – I will ask again tomorrow'); render(); },
   leftCarry: function (el) {
     var pr = period(), amt = round2(Number(el.getAttribute('data-val')) || 0);
-    if (amt > 0) S.tx.push({ id: uid(), date: pr.startIso, type: 'in', amount: amt, category: 'Other', name: 'Left over from last money month', paidWith: null, planned: true });
+    if (amt > 0) pushTx({ id: uid(), date: pr.startIso, type: 'in', amount: amt, category: 'Other', name: 'Left over from last money month', paidWith: null, planned: true, noBank: true });
     S.leftoverDone[pr.startIso] = true; save(); toast('Added to this month'); render();
   },
   leftPot: function (el) {
     var pr = period(), amt = round2(Number(el.getAttribute('data-val')) || 0), id = el.getAttribute('data-id');
-    S.pots.forEach(function (p) { if (p.id === id) p.saved = round2((p.saved || 0) + amt); });
+    S.pots.forEach(function (p) { if (p.id === id) { p.saved = round2((p.saved || 0) + amt); bankMove(-amt, 'Into ' + p.name + ' pot'); } });
     S.leftoverDone[pr.startIso] = true; save(); toast('Put in the pot'); render();
   },
   leftRest: function (el) {
@@ -2282,13 +2422,26 @@ var ACTIONS = {
     var info = leftoverInfo(), L = ui.left, total = leftTotals();
     if (total > info.left + 0.004) { L.err = 'That is ' + money2(total - info.left) + ' more than was left. Please lower one of the amounts.'; render(); return; }
     var bits = [];
-    S.pots.forEach(function (p) { var v = round2(num(L['p_' + p.id])); if (v > 0) { p.saved = round2((p.saved || 0) + v); bits.push(money2(v) + ' to ' + p.name); } });
+    S.pots.forEach(function (p) { var v = round2(num(L['p_' + p.id])); if (v > 0) { p.saved = round2((p.saved || 0) + v); bankMove(-v, 'Into ' + p.name + ' pot'); bits.push(money2(v) + ' to ' + p.name); } });
     var sp = round2(num(L.spend));
-    if (sp > 0) { S.tx.push({ id: uid(), date: info.pr.startIso, type: 'in', amount: sp, category: 'Other', name: 'Left over from last money month', paidWith: null, planned: true }); bits.push(money2(sp) + ' to spending money'); }
+    if (sp > 0) { pushTx({ id: uid(), date: info.pr.startIso, type: 'in', amount: sp, category: 'Other', name: 'Left over from last money month', paidWith: null, planned: true, noBank: true }); bits.push(money2(sp) + ' to spending money'); }
     S.leftoverDone[info.pr.startIso] = true; ui.left = null; save();
     toast(bits.length ? 'Done: ' + bits.join(', ') : 'Nothing shared out'); go('today');
   },
   leftLeave: function () { S.leftoverDone[period().startIso] = true; save(); render(); },
+  balSave: function (el) {
+    var f = ui.bal, bank = num(String(f.bank).replace('−', '-')), cash = num(String(f.cash || '0').replace('−', '-'));
+    if (!isFinite(bank)) { f.err = 'Please type the bank balance.'; render(); return; }
+    if (!isFinite(cash)) cash = 0;
+    S.bankCheck = { bank: round2(bank), cash: round2(cash), date: iso(today()), at: Date.now() }; save(); ui.bal = null;
+    toast('Saved – checked today');
+    if (el.getAttribute('data-from') === 'checkin') { ui.ciStep++; render(); } else render();
+  },
+  balRight: function (el) {
+    var e = bankEstimate(); if (!e) return;
+    S.bankCheck = { bank: e.bank, cash: e.cash, date: iso(today()), at: Date.now() }; save(); ui.bal = null; toast('Good – checked today');
+    if (el.getAttribute('data-from') === 'checkin') { ui.ciStep++; } render();
+  },
   soonToggle: function () { ui.soonAll = !ui.soonAll; render(); },
   shiftNoteNo: function () { S.shiftNoteDone = true; save(); render(); },
   endTour: function () { S.tourDone = true; save(); go('today'); },
@@ -2304,13 +2457,15 @@ var ACTIONS = {
   installNow: function () { if (!installPrompt) return; installPrompt.prompt(); installPrompt.userChoice.finally(function () { installPrompt = null; render(); }); }
 };
 
+function bankMove(delta, name) { pushTx({ id: uid(), date: iso(today()), type: 'bank', amount: Math.abs(delta), delta: round2(delta), category: 'Other', name: name, paidWith: null, planned: true }); }
+
 function potMove(id, dir) {
   var p = null; S.pots.forEach(function (x) { if (x.id === id) p = x; });
   var amt = round2(num(ui.pot && ui.pot.move));
   if (!p || !(amt > 0)) { if (ui.pot) { ui.pot.err = 'Type an amount first.'; ui.pot.errTop = true; } render(); return; }
   if (dir < 0 && amt > (p.saved || 0) + 0.004) { ui.pot.err = 'There is only ' + money(p.saved || 0) + ' in this pot.'; ui.pot.errTop = true; render(); return; }
   p.saved = round2((p.saved || 0) + dir * amt);
-  S.tx.push({ id: uid(), date: iso(today()), type: dir > 0 ? 'out' : 'in', amount: amt, category: 'Savings', name: (dir > 0 ? 'Into ' : 'From ') + p.name + ' pot', paidWith: 'bank', planned: true, potId: p.id });
+  pushTx({ id: uid(), date: iso(today()), type: dir > 0 ? 'out' : 'in', amount: amt, category: 'Savings', name: (dir > 0 ? 'Into ' : 'From ') + p.name + ' pot', paidWith: 'bank', planned: true, potId: p.id });
   save(); ui.pot.move = ''; ui.pot.err = ''; ui.pot.errTop = false;
   toast(dir > 0 ? money2(amt) + ' moved from spending money into the pot' : money2(amt) + ' moved from the pot to spending money'); render();
 }
@@ -2392,10 +2547,14 @@ function loadExample() {
   var amounts = [[12.4, 'Food shop', 'Corner shop'], [9.8, 'Travel', 'Bus fares'], [31.2, 'Food shop', 'Big shop'], [6.4, 'Eating out', 'Coffee and cake'], [14, 'Food shop', 'Food shop'], [10.5, 'Fun', 'Cinema'], [28.6, 'Clothes', 'New jumper'], [8, 'Eating out', 'Lunch'], [11.1, 'Food shop', 'Top-up shop']];
   for (var i = 1; i < dom; i++) {
     var a = amounts[(i - 1) % amounts.length];
-    S.tx.push({ id: uid(), date: dt(i), type: 'out', amount: a[0], category: a[1], name: a[2], paidWith: a[1] === 'Clothes' ? S.accounts[2].id : 'bank', planned: a[1] === 'Food shop' || a[1] === 'Travel' });
+    pushTx({ id: uid(), date: dt(i), type: 'out', amount: a[0], category: a[1], name: a[2], paidWith: a[1] === 'Clothes' ? S.accounts[2].id : 'bank', planned: a[1] === 'Food shop' || a[1] === 'Travel' });
   }
   S.wish = [{ id: uid(), name: 'Headphones', price: 60, added: iso(addDays(d, -8)), paidWith: 'bank' }, { id: uid(), name: 'Video game', price: 35, added: iso(addDays(d, -14)), paidWith: 'bank' }];
   S.startDate = dt(1); S.setupDone = true; S.setupStep = 6; S.tourDone = false; S.lastBackup = null; S.lastCheckIn = iso(addDays(d, -((d.getDay() + 7 - S.settings.checkInDay) % 7)));
+  // a checked balance that roughly agrees with the example figures (£24.60 left over from last month)
+  S.settings.startDay = 28; S.shiftNoteDone = true;  // the example's money month follows its pay day
+  S.bankCheck = { bank: 0, cash: 25, date: iso(d), at: Date.now() + 1 };
+  var bd = breakdown(d); S.bankCheck.bank = round2(bd.diff + 24.6);
   save();
 }
 
@@ -2445,6 +2604,7 @@ window.addEventListener('hashchange', function () {
     if (base !== 'pot') ui.pot = null;
     if (base !== 'debt') ui.debt = null;
     if (base !== 'fullpay') ui.fullpay = null;
+    ui.bal = null;
   }
   if (base === 'setup') { ui.itemBack = r; ui.cardBack = r; ui.potBack = r; ui.debtBack = r; }
   else if (base === 'checkin') { ui.cardBack = 'checkin'; ui.debtBack = 'checkin'; }

@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.7.2';
+var APP_VERSION = '1.7.3';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -1705,7 +1705,6 @@ function vPrivacy() {
     var style = 'min-height:3.8rem;padding:.4rem 1rem;width:100%;background:none;border:0;' + (i ? 'border-top:1px solid var(--track);' : '') + 'text-align:left;cursor:pointer;color:var(--ink);text-decoration:none';
     return a[0] === 'print' ? '<a class="row" href="#print" style="' + style + '">' + inner + '</a>' : '<button type="button" class="row" data-act="' + a[0] + '" style="' + style + '">' + inner + '</button>';
   }).join('') + '</section>';
-  h += '<input type="file" id="restore-file" accept="application/json,.json" class="sr" tabindex="-1" aria-hidden="true">';
   h += '<button class="btn danger push" data-act="askWipe">Delete all my money information</button>';
   return h;
 }
@@ -2391,7 +2390,20 @@ var ACTIONS = {
     copyText(text, 'Summary copied – paste it into a message');
   },
   backup: function () { doBackup(); },
-  restore: function () { if (needPin('restore')) return; var f = document.getElementById('restore-file'); if (f) f.click(); },
+  restore: function () {
+    if (needPin('restore')) return;
+    var old = document.getElementById('restore-file'); if (old) old.remove();
+    var inp = document.createElement('input');
+    inp.type = 'file'; inp.id = 'restore-file';   // no file-type filter: some phones grey out .json files
+    inp.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    inp.addEventListener('change', function () { if (inp.files && inp.files[0]) restoreFrom(inp.files[0]); setTimeout(function () { inp.remove(); }, 0); });
+    document.body.appendChild(inp);
+    inp.click();
+  },
+  doRestore: function () {
+    var st = ui.pendingRestore; ui.pendingRestore = null; if (!st) { render(); return; }
+    S = mergeDefaults(st); save(); ui = resetUI(); ui.unlocked = true; toast('Backup restored'); go('today');
+  },
   csv: function () { exportCSV(); },
   doPrint: function () { window.print(); },
   askWipe: function () { ui.confirm = { title: 'Delete everything?', text: 'All my money information will be removed from this phone. This cannot be undone. Make a backup first if I might want it later.', yes: 'Yes, delete all', act: 'wipe' }; render(); },
@@ -2504,12 +2516,16 @@ function doBackup() {
 }
 function restoreFrom(file) {
   var r = new FileReader();
+  r.onerror = function () { toast('Could not open that file'); };
   r.onload = function () {
-    try {
-      var d = JSON.parse(r.result);
-      if (!d || d.app !== 'money-planner' || !d.state) throw new Error('not ours');
-      S = mergeDefaults(d.state); save(); ui = resetUI(); ui.unlocked = true; toast('Backup restored'); go('today');
-    } catch (e) { toast('That file is not a Money Planner backup'); }
+    var d;
+    try { d = JSON.parse(r.result); } catch (e) { d = null; }
+    if (!d || d.app !== 'money-planner' || !d.state) { ui.confirm = null; toast('That file is not a Money Planner backup'); render(); return; }
+    var st = d.state, when = d.exported ? new Date(d.exported) : null;
+    ui.pendingRestore = st;
+    ui.confirm = { title: 'Restore this backup?', yes: 'Yes, restore it', act: 'doRestore',
+      text: 'Backup' + (when && !isNaN(when) ? ' from ' + longDate(when) : '') + ': ' + (st.incomes || []).length + ' money in, ' + (st.bills || []).length + ' bills, ' + ((st.accounts || []).length + (st.debts || []).length) + ' cards and debts, ' + (st.pots || []).length + ' pots. It replaces everything on this phone now.' };
+    render();
   };
   r.readAsText(file);
 }
@@ -2601,7 +2617,6 @@ document.addEventListener('input', function (e) {
 document.addEventListener('change', function (e) {
   if (e.target && e.target.getAttribute && e.target.getAttribute('data-change') === 'startDay') { ACTIONS.setStartDay(e.target.value); return; }
   if (e.target && e.target.getAttribute && e.target.getAttribute('data-bind') === 'item.date') { render(); return; }
-  if (e.target && e.target.id === 'restore-file' && e.target.files && e.target.files[0]) restoreFrom(e.target.files[0]);
   var b = e.target.getAttribute && e.target.getAttribute('data-bind');
 });
 document.addEventListener('keydown', function (e) {

@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.7.0';
+var APP_VERSION = '1.7.2';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -757,6 +757,8 @@ function potStatus(p, d) {
   return { kind: 'behind', text: 'A bit behind: needs about ' + money0(Math.ceil(need)) + ' a month to reach ' + money0(p.goal) + ' by ' + MONTH_NAMES[by.getMonth()] };
 }
 
+function potKey(d) { var lp = lastPayday(d || today()); return lp ? monthKey(lp) : monthKey(d || today()); }
+
 /* add each pot's monthly amount once its pay day has passed in a month */
 function applyMonthlyPots(d) {
   d = d || today();
@@ -764,8 +766,9 @@ function applyMonthlyPots(d) {
   var key = lp ? monthKey(lp) : monthKey(d);
   if (!lp && d.getDate() < 28) return;
   S.pots.forEach(function (p) {
-    if (!(p.monthly > 0)) return;
     if (!p.lastAdded) { p.lastAdded = key; return; }
+    if (p.lastAdded < key && p.nextMonthly != null) { p.monthly = p.nextMonthly; delete p.nextMonthly; }  // a changed amount starts on this pay day
+    if (!(p.monthly > 0)) { p.lastAdded = key; return; }
     if (p.lastAdded < key) {
       var from = parseISO(p.lastAdded + '-01'), to = parseISO(key + '-01');
       var n = Math.max(0, Math.min(monthsBetween(from, to), 12));
@@ -1485,7 +1488,7 @@ function vPots() {
   h += S.pots.map(function (p) {
     var st = potStatus(p);
     var line = st.kind === 'ok' || st.kind === 'done' ? '<span class="flag ok-ink">' + sig('ok', 16) + esc(st.text) + '</span>' : st.kind === 'behind' ? '<span class="flag warn-ink">' + sig('warn', 16) + esc(st.text) + '</span>' : '<span class="small muted">' + esc(st.text) + '</span>';
-    return '<a class="card tight" href="#pot/' + p.id + '" style="text-decoration:none;color:inherit"><div class="row between"><span class="row" style="gap:.5rem;font-weight:700"><span class="dot" style="background:' + esc(p.colour) + '"></span>' + esc(p.name) + '</span><span class="small muted">+' + money0(p.monthly || 0) + ' each month</span></div>' + line + '</a>';
+    return '<a class="card tight" href="#pot/' + p.id + '" style="text-decoration:none;color:inherit"><div class="row between"><span class="row" style="gap:.5rem;font-weight:700"><span class="dot" style="background:' + esc(p.colour) + '"></span>' + esc(p.name) + '</span><span class="small muted">' + (p.monthly ? '+' + money0(p.monthly) + ' each month · goes in by itself' : 'No monthly amount') + (p.nextMonthly != null ? ' · ' + money0(p.nextMonthly) + ' from next pay day' : '') + '</span></div>' + line + '</a>';
   }).join('');
   return h;
 }
@@ -1493,7 +1496,7 @@ function vPot(id) {
   var isNew = id === 'new', src = null;
   S.pots.forEach(function (p) { if (p.id === id) src = p; });
   if (!isNew && !src) return backHeader('Pot not found', 'pots');
-  if (!ui.pot || ui.pot.key !== id) ui.pot = { key: id, name: src ? src.name : '', colour: src ? src.colour : COLOURS[4][1], saved: src ? String(src.saved || 0) : '', goal: src && src.goal ? String(src.goal) : '', monthly: src && src.monthly ? String(src.monthly) : '', by: src ? (src.by || '') : '', move: '', err: '' };
+  if (!ui.pot || ui.pot.key !== id) ui.pot = { key: id, name: src ? src.name : '', colour: src ? src.colour : COLOURS[4][1], saved: src ? String(src.saved || 0) : '', goal: src && src.goal ? String(src.goal) : '', monthly: src ? String(src.nextMonthly != null ? src.nextMonthly : (src.monthly || '')) : '', by: src ? (src.by || '') : '', move: '', err: '' };
   var f = ui.pot, back = ui.potBack || 'pots';
   var h = backHeader(isNew ? 'New savings pot' : esc(src.name), back);
   if (!isNew) {
@@ -1501,6 +1504,7 @@ function vPot(id) {
       '<div class="row"><input class="inp" style="flex:1" data-bind="pot.move" inputmode="decimal" placeholder="£ amount" value="' + esc(f.move) + '"></div>' +
       '<div class="btnrow"><button class="btn sm sec" data-act="potIn" data-id="' + id + '">' + ic('down', 18) + 'Put money in</button><button class="btn sm sec" data-act="potOut" data-id="' + id + '">' + ic('up', 18) + 'Take money out</button></div>' +
       (f.err && f.errTop ? '<p class="err" role="alert">' + f.err + '</p>' : '') +
+      (src.monthly > 0 ? '<div class="card soft tight small row top">' + ic('info', 18) + '<span>This month’s ' + money(src.monthly) + ' ' + (src.lastAdded === potKey() ? 'is already in the pot' : 'goes in on pay day') + ' – it happens by itself. Only use “Put money in” for extra money.</span></div>' : '') +
       '<span class="tiny muted">Putting money in comes out of my spending money. Taking it out adds to it.</span></section>' +
       '<h2 class="sec-title" style="margin-top:.4rem">' + ic('edit', 18) + 'Change this pot’s details</h2>';
   }
@@ -1510,7 +1514,8 @@ function vPot(id) {
     '<label class="fld">Goal (£)<input class="inp" data-bind="pot.goal" inputmode="decimal" value="' + esc(f.goal) + '"></label>' +
     '<label class="fld">Each month (£)<input class="inp" data-bind="pot.monthly" inputmode="decimal" value="' + esc(f.monthly) + '"></label>' +
     '<label class="fld">Needed by (optional)<input class="inp" type="month" data-bind="pot.by" value="' + esc(f.by) + '"></label></div>';
-  h += '<p class="small muted">The amount each month is set aside on pay day, like a bill.</p>';
+  if (src && src.nextMonthly != null) { var npd = nextPayday(addDays(today(), 1)); h += '<div class="card soft tight small">' + money(src.monthly || 0) + ' a month until ' + (npd ? dayMonth(npd) : 'next pay day') + ', then ' + money(src.nextMonthly) + ' a month.</div>'; }
+  h += '<p class="small muted">The amount each month comes off my spending money and goes into the pot by itself – straight away for a new pot, then on each pay day. If I change it, the new amount starts on the next pay day. I don’t need to use “Put money in” for it.</p>';
   if (f.err && !f.errTop) h += '<p class="err" role="alert">' + f.err + '</p>';
   h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="savePot" data-id="' + id + '">' + (isNew ? 'Save' : 'Save details') + '</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelPot" data-id="' + id + '">Delete this pot</button>') + '</div>';
   return h;
@@ -1523,9 +1528,16 @@ function savePot(id) {
   var monthly = num(f.monthly) > 0 ? round2(num(f.monthly)) : 0;
   if ((!src || src.monthly !== monthly) && monthly > 0 && needPin('savePot', id)) return;
   var data = { name: f.name.trim(), colour: f.colour, goal: num(f.goal) > 0 ? round2(num(f.goal)) : 0, monthly: monthly, by: /^\d{4}-\d{2}$/.test(f.by) ? f.by : '' };
+  var pending = false;
+  if (src && src.lastAdded === potKey() && (src.monthly || 0) !== monthly) {
+    // this month's amount has already gone in, so the new amount starts on the next pay day
+    pending = true; src.nextMonthly = monthly; data.monthly = src.monthly || 0;
+  } else if (src) delete src.nextMonthly;
   if (src) Object.keys(data).forEach(function (k) { src[k] = data[k]; });
-  else { data.id = uid(); data.saved = num(f.saved) > 0 ? round2(num(f.saved)) : 0; var lp = lastPayday(); data.lastAdded = lp ? monthKey(lp) : monthKey(today()); S.pots.push(data); }
-  save(); ui.pot = null; toast('Saved'); go(ui.potBack || 'pots');
+  else { data.id = uid(); data.saved = num(f.saved) > 0 ? round2(num(f.saved)) : 0; var lp = lastPayday(); data.lastAdded = lp ? monthKey(lp) : monthKey(today()); data.saved = round2(data.saved + (data.monthly || 0)); S.pots.push(data); }
+  save(); ui.pot = null;
+  var np = nextPayday(addDays(today(), 1));
+  toast(pending ? 'Saved – ' + money(monthly) + ' a month starts ' + (np ? 'on ' + dayMonth(np) : 'next pay day') : 'Saved'); go(ui.potBack || 'pots');
 }
 
 /* ---------- Good days ---------- */

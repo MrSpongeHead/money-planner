@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.6.0';
+var APP_VERSION = '1.6.1';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -1418,7 +1418,9 @@ function vPot(id) {
     h += '<section class="card"><div class="row between"><span class="muted">In this pot</span><span class="mid">' + money(src.saved || 0) + '</span></div>' +
       '<div class="row"><input class="inp" style="flex:1" data-bind="pot.move" inputmode="decimal" placeholder="£ amount" value="' + esc(f.move) + '"></div>' +
       '<div class="btnrow"><button class="btn sm" data-act="potIn" data-id="' + id + '">Put money in</button><button class="btn sm ghost" data-act="potOut" data-id="' + id + '">Take money out</button></div>' +
-      '<span class="tiny muted">Putting money in comes out of my spending money. Taking it out adds to it.</span></section>';
+      (f.err && f.errTop ? '<p class="err" role="alert">' + f.err + '</p>' : '') +
+      '<span class="tiny muted">Putting money in comes out of my spending money. Taking it out adds to it.</span></section>' +
+      '<h2 class="sec-title" style="margin-top:.4rem">' + ic('edit', 18) + 'Change this pot’s details</h2>';
   }
   h += '<label class="fld">Name<input class="inp" data-bind="pot.name" value="' + esc(f.name) + '" placeholder="For example: Holiday"></label>';
   h += '<div class="pills">' + COLOURS.map(function (c) { var on = f.colour === c[1]; return '<button type="button" data-act="pick" data-group="pot.colour" data-val="' + c[1] + '" aria-pressed="' + on + '" aria-label="' + c[0] + '" class="cpick" style="background:' + c[1] + '"></button>'; }).join('') + '</div>';
@@ -1427,12 +1429,13 @@ function vPot(id) {
     '<label class="fld">Each month (£)<input class="inp" data-bind="pot.monthly" inputmode="decimal" value="' + esc(f.monthly) + '"></label>' +
     '<label class="fld">Needed by (optional)<input class="inp" type="month" data-bind="pot.by" value="' + esc(f.by) + '"></label></div>';
   h += '<p class="small muted">The amount each month is set aside on pay day, like a bill.</p>';
-  if (f.err) h += '<p class="err" role="alert">' + f.err + '</p>';
-  h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="savePot" data-id="' + id + '">Save</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelPot" data-id="' + id + '">Delete this pot</button>') + '</div>';
+  if (f.err && !f.errTop) h += '<p class="err" role="alert">' + f.err + '</p>';
+  h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="savePot" data-id="' + id + '">' + (isNew ? 'Save' : 'Save details') + '</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelPot" data-id="' + id + '">Delete this pot</button>') + '</div>';
   return h;
 }
 function savePot(id) {
   var f = ui.pot;
+  if (id !== 'new' && num(f.move) > 0) { f.err = 'I typed ' + money2(num(f.move)) + ' but it has not been moved yet. Tap “Put money in” or “Take money out” first.'; f.errTop = true; render(); window.scrollTo(0, 0); return; }
   if (!f.name.trim()) { f.err = 'Please type a name.'; render(); return; }
   var src = null; S.pots.forEach(function (p) { if (p.id === id) src = p; });
   var monthly = num(f.monthly) > 0 ? round2(num(f.monthly)) : 0;
@@ -2304,11 +2307,12 @@ var ACTIONS = {
 function potMove(id, dir) {
   var p = null; S.pots.forEach(function (x) { if (x.id === id) p = x; });
   var amt = round2(num(ui.pot && ui.pot.move));
-  if (!p || !(amt > 0)) { if (ui.pot) ui.pot.err = 'Type an amount first.'; render(); return; }
-  if (dir < 0 && amt > (p.saved || 0) + 0.004) { ui.pot.err = 'There is only ' + money(p.saved || 0) + ' in this pot.'; render(); return; }
+  if (!p || !(amt > 0)) { if (ui.pot) { ui.pot.err = 'Type an amount first.'; ui.pot.errTop = true; } render(); return; }
+  if (dir < 0 && amt > (p.saved || 0) + 0.004) { ui.pot.err = 'There is only ' + money(p.saved || 0) + ' in this pot.'; ui.pot.errTop = true; render(); return; }
   p.saved = round2((p.saved || 0) + dir * amt);
   S.tx.push({ id: uid(), date: iso(today()), type: dir > 0 ? 'out' : 'in', amount: amt, category: 'Savings', name: (dir > 0 ? 'Into ' : 'From ') + p.name + ' pot', paidWith: 'bank', planned: true, potId: p.id });
-  save(); ui.pot.move = ''; ui.pot.err = ''; toast(dir > 0 ? 'Put in the pot' : 'Taken out of the pot'); render();
+  save(); ui.pot.move = ''; ui.pot.err = ''; ui.pot.errTop = false;
+  toast(dir > 0 ? money2(amt) + ' moved from spending money into the pot' : money2(amt) + ' moved from the pot to spending money'); render();
 }
 
 function resetUI() { return { add: null, inoutTab: 'regular', calOff: 0, calSel: null, item: null, card: null, pot: null, buy: null, ciStep: 0, confirm: null, help: false, unlocked: false, dismissed: {}, skipInstall: ui.skipInstall }; }

@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.9.0';
+var APP_VERSION = '1.9.1';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -550,7 +550,16 @@ function nextPayday(from) { var p = nextPayInfo(from); return p ? p.actual : nul
 function lastPayday(from) { var p = lastPayInfo(from); return p ? p.actual : null; }
 
 function txOn(dIso) { return S.tx.filter(function (t) { return t.date === dIso; }); }
-function spentOn(dIso) { var s = 0; S.tx.forEach(function (t) { if (t.type === 'out' && t.date === dIso) s += t.amount; }); return s; }
+/* a one-off money out added with a later date is "booked ahead": it is set aside from the moment it is added
+   (like a bill), not counted as spending on the day. Older records use the time they were added. */
+function isAhead(t) {
+  if (!t || t.type !== 'out') return false;
+  if (t.ahead !== undefined) return !!t.ahead;
+  return !!(t.created && t.date > iso(new Date(t.created)));
+}
+function aheadIn(pr) { return S.tx.filter(function (t) { return isAhead(t) && t.date >= pr.startIso && t.date <= pr.endIso; }); }
+function aheadTotal(pr) { return round2(aheadIn(pr).reduce(function (s, t) { return s + t.amount; }, 0)); }
+function spentOn(dIso) { var s = 0; S.tx.forEach(function (t) { if (t.type === 'out' && t.date === dIso && !isAhead(t)) s += t.amount; }); return s; }
 /* The budget month runs from the chosen start day (1–28) to the day before it next month */
 function startDay() { var n = parseInt(S.settings.startDay, 10); return n >= 1 && n <= 28 ? n : 1; }
 function followsPay() { var mi = mainIncome(); return !!(mi && mi.freq === 'monthly' && (mi.day || 1) === startDay()); }
@@ -601,11 +610,13 @@ function calc(d) {
     if (t.date < pr.startIso || t.date > pr.endIso) return;
     if (t.type === 'in') { inMonth += t.amount; return; }
     if (t.type !== 'out') return;           // cash withdrawals and bank-only moves are not spending
+    if (isAhead(t)) return;                 // booked ahead: already taken off below
     if (t.date > dIso) return;
     spent += t.amount;
     if (t.date < dIso) spentBefore += t.amount; else spentToday += t.amount;
   });
-  var budget = p.spending + inMonth;
+  var ahead = aheadTotal(pr);
+  var budget = p.spending + inMonth - ahead;
   var left = budget - spent;
   var daysLeft = days - dom + 1;
   var startLeft = budget - spentBefore;
@@ -623,7 +634,7 @@ function calc(d) {
   else if (usedFrac > lineFrac + 0.10 || (plannedDaily > 0 && perDay < plannedDaily * 0.6)) status = 'warn';
   var pd = nextPayday(d);
   return {
-    plan: p, period: pr, budget: budget, inMonth: inMonth, spent: spent, spentToday: spentToday, left: left,
+    plan: p, period: pr, budget: budget, ahead: ahead, inMonth: inMonth, spent: spent, spentToday: spentToday, left: left,
     days: days, dom: dom, daysLeft: daysLeft, daily: daily, todayLeft: todayLeft, weekLeft: weekLeft, weekDays: weekDays,
     plannedDaily: plannedDaily, lineFrac: lineFrac, usedFrac: usedFrac, perDay: perDay, status: status,
     payday: pd, daysToPay: pd ? diffDays(d, pd) : null
@@ -635,7 +646,7 @@ function calc(d) {
 function periodResults(pr, upTo) {
   var p = plan(), inMonth = 0;
   S.tx.forEach(function (t) { if (t.type === 'in' && t.date >= pr.startIso && t.date <= pr.endIso) inMonth += t.amount; });
-  var budget = p.spending + inMonth, run = 0, res = {};
+  var budget = p.spending + inMonth - aheadTotal(pr), run = 0, res = {};
   var startIso = S.startDate || '0000-00-00';
   for (var i = 0; i < pr.days; i++) {
     var dt = addDays(pr.start, i), k = iso(dt);
@@ -899,6 +910,8 @@ function upcomingBills(from, days) {
   for (var i = 0; i < days; i++) {
     var d = addDays(from, i);
     allBills().forEach(function (b) { if (occursOn(b, d)) out.push({ b: b, d: d, inDays: i }); });
+    var k = iso(d);
+    S.tx.forEach(function (t) { if (t.date === k && isAhead(t)) out.push({ b: { name: t.name, amount: t.amount, category: t.category, oneOff: true }, d: d, inDays: i }); });
   }
   return out;
 }
@@ -1015,7 +1028,7 @@ function vToday() {
     '<div class="grid2"><div class="tile"><span class="l">Left this week</span><span class="v">' + money0(c.weekLeft) + '</span></div>' +
     '<div class="tile"><span class="l">Left this month</span><span class="v">' + money0(c.left) + '</span></div></div>' + keepLine(c) + bankLines(d) + '</section>';
   h += '<section class="card"><div class="row between"><b>Spending money this month</b><span class="muted">' + money0(c.budget) + '</span></div>' +
-    (startDay() !== 1 ? '<span class="small muted" style="margin-top:-.4rem">' + periodLabel(c.period) + '</span>' : '') + '<div role="img" aria-label="Used ' + Math.round(used) + ' percent. The black line shows where you should be by today.">' + bar(used, STATUS_FILL[c.status], '', c.lineFrac * 100) + '</div>' +
+    (startDay() !== 1 ? '<span class="small muted" style="margin-top:-.4rem">' + periodLabel(c.period) + '</span>' : '') + aheadLine(c) + '<div role="img" aria-label="Used ' + Math.round(used) + ' percent. The black line shows where you should be by today.">' + bar(used, STATUS_FILL[c.status], '', c.lineFrac * 100) + '</div>' +
     '<div class="row between small muted"><span>Used ' + money0(c.spent) + ' (' + Math.round(c.usedFrac * 100) + '%)</span><span>Black line = where I should be today</span></div>' + (function () {
       var ex = extrasInfo(d);
       if (!ex.count) return '';
@@ -1035,6 +1048,13 @@ function vToday() {
   return h;
 }
 
+function aheadLine(c) {
+  var list = aheadIn(c.period).sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+  if (!list.length) return '';
+  var t = iso(today()), still = list.filter(function (x) { return x.date >= t; });
+  var one = list.length === 1 ? esc(list[0].name) + ' on ' + dayMonth(parseISO(list[0].date)) : list.length + ' one-off payments';
+  return '<span class="small muted" style="margin-top:-.3rem">' + money2(c.ahead) + (still.length === list.length ? ' already set aside for ' : ' taken off for ') + one + '</span>';
+}
 function keepLine(c) {
   var k = S.settings.keep, amt = keepAmount();
   if (!amt || !k.show) return '';
@@ -1087,6 +1107,7 @@ function saveAdd() {
   var name = (a.name || '').trim() || a.cat;
   if (a.freq === 'once') {
     var t = { id: uid(), date: a.date, type: a.type, amount: amt, category: a.cat, name: name, paidWith: a.type === 'out' ? a.paidWith : null, planned: a.type === 'out' ? a.planned === 'yes' : true };
+    if (t.type === 'out') t.ahead = t.date > iso(today());
     pushTx(t);
     if (t.type === 'out') { var ac = acct(t.paidWith); if (ac) ac.balance = round2((ac.balance || 0) + amt); }
   } else {
@@ -1096,7 +1117,7 @@ function saveAdd() {
   }
   save();
   var back = a.back; ui.add = null;
-  toast('Saved');
+  toast(a.freq === 'once' && a.type === 'out' && a.date > iso(today()) ? 'Saved – ' + money2(amt) + ' set aside for ' + dayMonth(parseISO(a.date)) : 'Saved');
   go(back);
 }
 
@@ -1139,7 +1160,7 @@ function vInOut() {
       void tot;
     }
     h += '<section class="list">' + (list.length ? list.map(function (t) {
-      var tag = t.type === 'in' ? '<span class="flag ok-ink">' + ic('down', 16) + 'In</span>' : (t.planned ? '' : '<span class="tiny" style="background:var(--warn-bg);color:var(--warn-ink);border-radius:.4rem;padding:.15rem .45rem;font-weight:700">Extra</span>');
+      var tag = t.type === 'in' ? '<span class="flag ok-ink">' + ic('down', 16) + 'In</span>' : (t.planned ? '' : '<span class="tiny" style="background:var(--warn-bg);color:var(--warn-ink);border-radius:.4rem;padding:.15rem .45rem;font-weight:700">Extra</span>') + (isAhead(t) && t.date > iso(d) ? '<span class="tiny" style="background:var(--primary-soft);color:var(--primary-deep);border-radius:.4rem;padding:.15rem .45rem;font-weight:700">Set aside</span>' : '');
       return '<button type="button" class="item" data-act="txMenu" data-id="' + t.id + '"><span class="ico-box">' + catIcon(t.category, 22) + '</span><span class="grow col"><span class="name">' + esc(t.name) + '</span><span class="meta">' + shortDate(parseISO(t.date)) + (t.type === 'out' ? ' · ' + esc(paidWithName(t.paidWith)) : '') + '</span></span>' + tag + '<span class="amt">' + money2(t.amount) + '</span></button>';
     }).join('') : '<p class="muted">Nothing added this month yet. Tap + to add.</p>') + '</section>';
   }
@@ -1174,7 +1195,7 @@ function vCalendar() {
     if (dt < t) cls.push('past'); if (sameDay(dt, t)) cls.push('today'); if (dd === ui.calSel) cls.push('sel');
     var marks = '';
     var rk = iso(dt); if (res[rk] === 'ok') marks += sig('ok', 13); else if (res[rk] === 'over') marks += sig('warn', 14);
-    if (allBills().some(function (b) { return occursOn(b, dt); })) marks += '<span class="billmark"></span>';
+    if (allBills().some(function (b) { return occursOn(b, dt); }) || txOn(iso(dt)).some(isAhead)) marks += '<span class="billmark"></span>';
     if (S.incomes.some(function (b) { return occursOn(b, dt); })) marks += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v16M5 12l7 7 7-7"/></svg>';
     h += '<button type="button" class="' + cls.join(' ') + '" data-act="calSel" data-val="' + dd + '" aria-label="' + longDate(dt) + '"' + (dd === ui.calSel ? ' aria-pressed="true"' : '') + '><span>' + dd + '</span><span class="marks">' + marks + '</span></button>';
   }
@@ -1189,7 +1210,7 @@ function vCalendar() {
   });
   S.incomes.forEach(function (b) { if (occursOn(b, sd)) rows += '<div class="row between ok-ink"><span>' + esc(b.name) + ' (in)</span><b>' + money(b.amount) + '</b></div>'; });
   if (bankHoliday(sd)) rows += '<div class="row small muted">' + ic('cal', 16) + 'Bank holiday: ' + esc(bankHoliday(sd)) + '</div>';
-  txOn(iso(sd)).forEach(function (tx) { rows += '<div class="row between"><span>' + esc(tx.name) + (tx.type === 'in' ? ' (in)' : '') + '</span><b>' + money2(tx.amount) + '</b></div>'; });
+  txOn(iso(sd)).forEach(function (tx) { rows += '<div class="row between"><span>' + esc(tx.name) + (tx.type === 'in' ? ' (in)' : '') + '</span><b>' + money2(tx.amount) + '</b></div>' + (isAhead(tx) ? '<span class="small muted" style="margin-top:-.3rem">One-off, already set aside – it does not touch my spending money on the day.</span>' : ''); });
   h += '<section class="card"><span class="muted small">' + longDate(sd) + '</span>' + (rows || '<span class="muted">Nothing on this day.</span>') +
     (allBills().some(function (b) { return occursOn(b, sd); }) ? '<span class="small ok-ink row" style="gap:.4rem">' + sig('ok', 16) + 'Bills are already set aside – they do not touch my spending money</span>' : '') + '</section>';
   return h;
@@ -1734,7 +1755,7 @@ function vTour(n) {
 /* ---------- Help ("?") ---------- */
 var HELP = {
   today: ['About the Today screen', [['The big number', 'How much I can spend today. My bills and savings are already taken off.'], ['Left this week and this month', 'The same money, shown for the rest of the week and the rest of the month.'], ['The bar', 'How much spending money I have used. The black line shows where I should be by today.'], ['The signal at the top', 'Green circle: on track. Amber triangle: slow down. Red octagon: stop spending on extras.'], ['Coming out soon', 'Bills due in the next 7 days. The first 3 show – tap “Show all” to see the rest.']]],
-  add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['Was this in my plan?', 'Choose “No, an extra” for anything I had not planned, like a treat. It still comes out of my spending money the same way. It lets me see how much went on extras this month.']]],
+  add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['Was this in my plan?', 'Choose “No, an extra” for anything I had not planned, like a treat. It still comes out of my spending money the same way. It lets me see how much went on extras this month.'], ['A later date', 'If something is just once and I pick a later date, the money is set aside straight away. My daily amount goes down a little now, not a lot on the day. It shows in “Coming out soon” and on the calendar.']]],
   inout: ['About Money in & out', [['Counts as … a month', 'For things that are not monthly, this is the share counted each month.'], ['Set aside bar', 'For bills that come less often than monthly: how much has built up towards the next one.'], ['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it. Extras have an amber “Extra” tag.']]],
   calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.'], ['Bills that are not monthly', 'They show the full amount on the day they go out, and how much is counted for them each month.']]],
   cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],

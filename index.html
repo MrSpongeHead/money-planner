@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.8.0';
+var APP_VERSION = '1.9.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -281,8 +281,10 @@ function defaultState() {
       pinLock: false, pin: null,
       helper: { balances: true, purchases: false, weekly: true },
       rules: { closeLimit: 80, stopLimit: 90 },
-      region: 'ew'
+      region: 'ew',
+      keep: { amount: 0, show: false, potId: '' }   // held back from spending money each month
     },
+    keepDone: {},              // money month start -> {amount, pot} once the kept money has been dealt with
     payOverrides: {},          // 'incomeId|nominal date' -> actual date (pay came early or late)
     payLate: null, leftoverDone: {}, shiftNoteDone: false,
     lastWarn: null, lastBackup: null, lastCheckIn: null, lastHelperSend: null
@@ -298,6 +300,8 @@ function mergeDefaults(s) {
   if (!s.settings.rules) s.settings.rules = d.settings.rules;
   if (!s.payOverrides || typeof s.payOverrides !== 'object') s.payOverrides = {};
   if (!s.leftoverDone || typeof s.leftoverDone !== 'object') s.leftoverDone = {};
+  if (!s.keepDone || typeof s.keepDone !== 'object') s.keepDone = {};
+  if (!s.settings.keep || typeof s.settings.keep !== 'object') s.settings.keep = { amount: 0, show: false, potId: '' };
   ['incomes', 'bills', 'accounts', 'debts', 'pots', 'tx', 'wish'].forEach(function (k) { if (!Array.isArray(s[k])) s[k] = []; });
   return s;
 }
@@ -516,7 +520,22 @@ function plan() {
   S.incomes.forEach(function (i) { inc += perMonth(i.amount, i.freq, i.n); });
   allBills().forEach(function (b) { out += perMonth(b.amount, b.freq, b.n); });
   S.pots.forEach(function (p) { sav += p.monthly || 0; });
-  return { income: inc, bills: out, savings: sav, spending: inc - out - sav };
+  var k = keepAmount(), shown = S.settings.keep && S.settings.keep.show;
+  // when the keep-back amount is hidden it is shown as part of "Saving", so it never looks like spare money
+  return { income: inc, bills: out, savings: sav, keep: k, keepShown: shown ? k : 0, savingShown: sav + (shown ? 0 : k), spending: inc - out - sav - k };
+}
+function keepAmount() { var k = S.settings.keep; return k && k.amount > 0 ? k.amount : 0; }
+/* at the start of a new money month, move what was kept last month into the chosen pot */
+function applyKeep(d) {
+  d = d || today();
+  var k = S.settings.keep, amt = keepAmount(), pr = period(d), prevPr = period(addDays(pr.start, -1));
+  if (!amt || S.keepDone[pr.startIso] || !S.startDate || S.startDate > prevPr.endIso) return;   // any month the app was used in
+  var prev = calc(addDays(pr.start, -1));
+  var kept = round2(Math.max(0, Math.min(amt, prev.left + amt)));
+  var pot = null; S.pots.forEach(function (p) { if (p.id === k.potId) pot = p; });
+  if (pot && kept > 0) pot.saved = round2((pot.saved || 0) + kept);
+  S.keepDone[pr.startIso] = { amount: kept, pot: pot ? pot.name : '' };
+  save();
 }
 
 /* pay day = next date of the biggest regular income */
@@ -896,6 +915,11 @@ function reminders(d) {
   // a new money month has started: what happens to what was left?
   var payUnconfirmed = pr.follows && pr.startIso === iso(d) && !S.leftoverDone['paid:' + iso(d)];
   var prevPr = period(addDays(pr.start, -1));
+  if (!payUnconfirmed && !S.payLate) applyKeep(d);
+  var kd = S.keepDone[pr.startIso];
+  if (kd && kd.amount > 0 && (kd.pot || S.settings.keep.show) && diffDays(pr.start, d) <= 7 && !ui.dismissed['keep:' + pr.startIso]) {
+    out.push('<div class="card ok"><div class="row top">' + sig('ok', 28) + '<div class="col"><b class="ok-ink">' + money2(kd.amount) + ' kept last month</b><span class="small">' + (kd.pot ? 'Moved into my ' + esc(kd.pot) + ' pot.' : 'It stays in my account.') + '</span></div></div><button class="btn sm ghost" data-act="dismiss" data-key="keep:' + pr.startIso + '">OK</button></div>');
+  }
   var askLeft = !S.leftoverDone[pr.startIso] && !payUnconfirmed && !S.payLate && diffDays(pr.start, d) <= 7 && S.startDate && S.startDate <= prevPr.startIso;
   if (askLeft) {
     var prev = calc(addDays(pr.start, -1));
@@ -989,7 +1013,7 @@ function vToday() {
   h += '<section class="card"><span class="muted">You can spend today</span><span class="big">' + money2(c.todayLeft) + '</span>' +
     (c.spentToday > 0 ? '<span class="small muted">Spent so far today: ' + money2(c.spentToday) + '</span>' : '') +
     '<div class="grid2"><div class="tile"><span class="l">Left this week</span><span class="v">' + money0(c.weekLeft) + '</span></div>' +
-    '<div class="tile"><span class="l">Left this month</span><span class="v">' + money0(c.left) + '</span></div></div>' + bankLines(d) + '</section>';
+    '<div class="tile"><span class="l">Left this month</span><span class="v">' + money0(c.left) + '</span></div></div>' + keepLine(c) + bankLines(d) + '</section>';
   h += '<section class="card"><div class="row between"><b>Spending money this month</b><span class="muted">' + money0(c.budget) + '</span></div>' +
     (startDay() !== 1 ? '<span class="small muted" style="margin-top:-.4rem">' + periodLabel(c.period) + '</span>' : '') + '<div role="img" aria-label="Used ' + Math.round(used) + ' percent. The black line shows where you should be by today.">' + bar(used, STATUS_FILL[c.status], '', c.lineFrac * 100) + '</div>' +
     '<div class="row between small muted"><span>Used ' + money0(c.spent) + ' (' + Math.round(c.usedFrac * 100) + '%)</span><span>Black line = where I should be today</span></div>' + (function () {
@@ -1011,6 +1035,14 @@ function vToday() {
   return h;
 }
 
+function keepLine(c) {
+  var k = S.settings.keep, amt = keepAmount();
+  if (!amt || !k.show) return '';
+  var used = round2(Math.min(amt, Math.max(0, -c.left))), row = 'display:flex;align-items:center;gap:.5rem;min-height:2.75rem;border-top:1px solid var(--track);padding-top:.5rem';
+  if (used <= 0.004) return '<div style="' + row + '">' + sig('ok', 18) + '<span class="small ok-ink"><b>On course to keep my ' + money0(amt) + ' target</b></span></div>';
+  if (used < amt) return '<div style="' + row + '">' + sig('warn', 18) + '<span class="small warn-ink"><b>' + money0(used) + ' of my ' + money0(amt) + ' target used</b></span></div>';
+  return '<div style="' + row + '">' + sig('stop', 18) + '<span class="small stop-ink"><b>My ' + money0(amt) + ' target has been used</b></span></div>';
+}
 function bankLines(d) {
   var come = moneyToCome(d);
   if (!(come.total > 0)) return '';
@@ -1072,11 +1104,11 @@ function saveAdd() {
 function vInOut() {
   var d = today(), p = plan();
   var h = header('Money in &amp; out', periodLabel(period(d)));
-  var tot = Math.max(p.income, p.bills + p.savings + Math.max(p.spending, 0)) || 1;
+  var tot = Math.max(p.income, p.bills + p.savings + p.keep + Math.max(p.spending, 0)) || 1;
   h += '<section class="card"><div class="row between"><b>Where my ' + money0(p.income) + ' goes</b><span class="muted small">each month</span></div>' +
-    '<div class="stack" role="img" aria-label="Bills ' + money0(p.bills) + ', saving ' + money0(p.savings) + ', spending money ' + money0(p.spending) + '">' +
-    '<span style="flex:' + p.bills + ';background:var(--primary)"></span><span style="flex:' + p.savings + ';background:var(--primary-mid)"></span><span style="flex:' + Math.max(p.spending, 0) + ';background:var(--primary-light)"></span></div>' +
-    '<div class="grid3 small">' + [['Bills', p.bills, 'var(--primary)'], ['Saving', p.savings, 'var(--primary-mid)'], ['Spending', p.spending, 'var(--primary-light)']].map(function (x) {
+    '<div class="stack" role="img" aria-label="Bills ' + money0(p.bills) + ', saving ' + money0(p.savingShown) + (p.keepShown ? ', kept back ' + money0(p.keepShown) : '') + ', spending money ' + money0(p.spending) + '">' +
+    '<span style="flex:' + p.bills + ';background:var(--primary)"></span><span style="flex:' + p.savingShown + ';background:var(--primary-mid)"></span>' + (p.keepShown ? '<span style="flex:' + p.keepShown + ';background:var(--ok)"></span>' : '') + '<span style="flex:' + Math.max(p.spending, 0) + ';background:var(--primary-light)"></span></div>' +
+    '<div class="small" style="display:grid;gap:.5rem;grid-template-columns:repeat(' + (p.keepShown ? 4 : 3) + ',minmax(0,1fr))">' + [['Bills', p.bills, 'var(--primary)'], ['Saving', p.savingShown, 'var(--primary-mid)']].concat(p.keepShown ? [['Kept back', p.keepShown, 'var(--ok)']] : []).concat([['Spending', p.spending, 'var(--primary-light)']]).map(function (x) {
       return '<div class="col"><span class="row muted" style="gap:.35rem"><span class="dot" style="background:' + x[2] + '"></span>' + x[0] + '</span><b style="font-size:1.05rem">' + money0(x[1]) + '</b></div>';
     }).join('') + '</div>' + (p.spending < 0 ? '<p class="err">My bills and savings are more than my money coming in.</p>' : '') + '</section>';
   void tot;
@@ -1576,6 +1608,20 @@ function startDayControl() {
   return h;
 }
 
+/* ---------- keep back each month ---------- */
+function keepControl() {
+  var k = S.settings.keep, amt = keepAmount();
+  var h = '<div class="col" style="gap:.5rem;padding-top:.6rem;border-top:1px solid var(--track)"><b>Keep back each month</b>' +
+    '<span class="small muted">This comes off my spending money, so my daily amount is a little lower. It stays in my account and is not for spending.</span>' +
+    '<label class="fld">Amount (£)<span class="hint">0 means off.</span><input class="inp" data-change="keepAmount" inputmode="decimal" value="' + (amt ? amt : '') + '" placeholder="0"></label>';
+  if (!amt) return h + '</div>';
+  h += '<div class="setrow"><span class="col"><span>Show it on Today</span><span class="small muted">' + (k.show ? 'On – Today shows how it is going' : 'Off – it works quietly') + '</span></span>' + sw('set.keepShow', k.show, 'Show it on Today') + '</div>';
+  h += '<span class="small" style="font-weight:700">At the end of the month, what I kept:</span><div class="pills">' +
+    '<button type="button" class="pill" data-act="keepPot" data-id="" aria-pressed="' + (!k.potId) + '">Stays in my account</button>' +
+    S.pots.map(function (p) { return '<button type="button" class="pill" data-act="keepPot" data-id="' + p.id + '" aria-pressed="' + (k.potId === p.id) + '"><span class="dot" style="background:' + esc(p.colour) + ';border-radius:999px"></span>Goes into ' + esc(p.name) + '</button>'; }).join('') + '</div>';
+  return h + '</div>';
+}
+
 /* ---------- Settings ---------- */
 function vSettings() {
   var st = S.settings;
@@ -1587,7 +1633,7 @@ function vSettings() {
     '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Warnings appear as</span>' + seg('set.warnStyle', [['full', 'Full screen'], ['banner', 'A box on Today']], st.warnStyle) + '</div>' +
     '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Colours</span>' + seg('set.theme', [['light', 'Light'], ['soft', 'Soft'], ['dark', 'Dark']], st.theme) + '</div>' +
     '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Weekly check-in day</span>' + seg('set.checkInDay', [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']], st.checkInDay, 7) + '</div></section>';
-  h += '<section class="card"><h2>My money month</h2>' + startDayControl() + '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Bank holidays for</span>' + seg('set.region', REGIONS, S.settings.region || 'ew') + '<span class="tiny muted">Used to move pay days. Dates are included up to the end of ' + BH_LAST_YEAR + '.</span></div></section>';
+  h += '<section class="card"><h2>My money month</h2>' + startDayControl() + '<div class="col" style="gap:.4rem;padding-top:.6rem;border-top:1px solid var(--track)"><span>Bank holidays for</span>' + seg('set.region', REGIONS, S.settings.region || 'ew') + '<span class="tiny muted">Used to move pay days. Dates are included up to the end of ' + BH_LAST_YEAR + '.</span></div>' + keepControl() + '</section>';
   var links = [['reminders', 'bell', 'Reminders'], ['checkin', 'clock', 'Do my weekly check-in now'], ['rules', 'bag', 'Rules for “Should I buy it?”'], ['helper', 'people', 'Trusted helper and PIN'], ['privacy', 'shield', 'Backup &amp; privacy'], ['tour/1', 'info', 'Show me the tour again'], ['setup', 'edit', 'Setting up (income, bills, cards, pots)']];
   h += '<nav class="card" style="padding:.2rem 0;gap:0" aria-label="More settings">' + links.map(function (l, i) {
     return '<a href="#' + l[0] + '" class="row" style="min-height:3rem;padding:0 1rem;text-decoration:none;color:var(--ink);' + (i ? 'border-top:1px solid var(--track)' : '') + '"><span style="color:var(--primary)">' + ic(l[1], 22) + '</span><span class="grow">' + l[2] + '</span>' + ic('next', 18) + '</a>';
@@ -1624,7 +1670,7 @@ function vHelper() {
     '<div class="setrow"><span>Offer to send it after my weekly check-in</span>' + sw('helper.weekly', hp.weekly, 'Offer to send it after my weekly check-in') + '</div>' +
     '<button class="btn" data-act="sendSummary">' + ic('share', 20) + 'Send my helper a summary</button></section>';
   h += '<section class="card"><div class="setrow"><span class="row">' + ic('lock', 22) + '<b>Lock my rules with a PIN</b></span>' + sw('set.pinLock', S.settings.pinLock, 'Lock my rules with a PIN') + '</div>' +
-    '<span class="small muted">When this is on, my income, bills, card limits, savings amounts, the day my money month starts and the “Should I buy it?” rules can only be changed with the PIN. Adding what I spend never needs it.</span>' +
+    '<span class="small muted">When this is on, my income, bills, card limits, savings amounts, the day my money month starts, the amount kept back and the “Should I buy it?” rules can only be changed with the PIN. Adding what I spend never needs it.</span>' +
     (S.settings.pinLock ? '<button class="linkbtn" data-act="changePin">Change the PIN</button>' : '') + '</section>';
   return h;
 }
@@ -1708,7 +1754,7 @@ var HELP = {
   leftover: ['About sharing out', [['Type the amounts', 'Put some in each pot, some in spending money, or leave some where it is.'], ['The rest', 'Fills that box with whatever has not been shared yet.'], ['Real money', 'The app only keeps track. Move the money in my banking app too.']]],
   reminders: ['About reminders', [['Where they show', 'On the Today screen when I open the app.'], ['0% deals', 'I get a reminder a month before a 0% deal ends.']]],
   checkin: ['About the weekly check-in', [['Four steps', 'Add anything I forgot, check what I owe, look at next week’s bills, see how the week went.'], ['When', 'The Today screen reminds me on my check-in day.']]],
-  settings: ['About settings', [['Text size and colours', 'Change how the app looks.'], ['Warnings', 'Full screen, or a box on the Today screen.'], ['My money month', 'The day my spending money starts again each month. Usually my pay day.']]],
+  settings: ['About settings', [['Text size and colours', 'Change how the app looks.'], ['Warnings', 'Full screen, or a box on the Today screen.'], ['My money month', 'The day my spending money starts again each month. Usually my pay day.'], ['Keep back each month', 'Money held back from my spending money so some is left at the end of the month.']]],
   helper: ['About my trusted helper', [['Summary', 'I choose what to send and who to send it to.'], ['PIN', 'Stops my rules and limits being changed by accident.']]],
   privacy: ['About backup and privacy', [['On this phone', 'Everything is saved on this phone only.'], ['Backup', 'Saves a file. Keep it somewhere safe, like email or cloud storage.'], ['Restore', 'Puts a backup file back. It replaces what is on this phone.']]],
   warning: ['About this warning', [['Why it shows', 'I have used more spending money than planned for this point in the month.'], ['What to do', 'Only spend on things in my plan until the new month.']]],
@@ -1776,7 +1822,7 @@ function vSetupStep(n) {
   } else if (n === 5) {
     var p = plan(), tot = Math.max(p.income, 1);
     h += backHeader('My spending money', 'setup', { sub: sub }) + '<p>This is worked out from what we have entered. Each month it goes like this:</p>';
-    h += '<section class="card">' + [['', 'Money coming in', p.income, 'var(--primary-deep)'], ['−', 'Regular bills and card payments', p.bills, 'var(--muted)'], ['−', 'Savings pots', p.savings, 'var(--primary-mid)']].map(function (r) {
+    h += '<section class="card">' + [['', 'Money coming in', p.income, 'var(--primary-deep)'], ['−', 'Regular bills and card payments', p.bills, 'var(--muted)'], ['−', 'Savings', p.savingShown, 'var(--primary-mid)']].concat(p.keepShown ? [['−', 'Kept back each month', p.keepShown, 'var(--ok)']] : []).map(function (r) {
       return '<div class="col" style="gap:.25rem"><div class="row between"><span><b>' + r[0] + '</b> ' + r[1] + '</span><b>' + money0(r[2]) + '</b></div>' + bar(r[2] / tot * 100, r[3], 'thin') + '</div>';
     }).join('') + '<div class="col" style="border-top:2px solid var(--ink);padding-top:.6rem;gap:.25rem"><div class="row between"><b style="font-size:1.1rem">= Spending money</b><span class="mid" style="font-size:1.8rem">' + money0(p.spending) + '</span></div>' + bar(Math.max(p.spending, 0) / tot * 100, 'var(--primary)', 'thin') +
       '<span class="small muted">That is about ' + money0(p.spending / 30) + ' a day in a 30-day month.</span></div></section>';
@@ -2161,7 +2207,8 @@ var ACTIONS = {
   toggle: function (el) {
     var k = el.getAttribute('data-key'), p = k.split('.');
     if (k === 'set.pinLock') { return ACTIONS.pinLockToggle(); }
-    if (p[0] === 'set') { S.settings[p[1]] = !S.settings[p[1]]; save(); }
+    if (k === 'set.keepShow') { S.settings.keep.show = !S.settings.keep.show; save(); }
+    else if (p[0] === 'set') { S.settings[p[1]] = !S.settings[p[1]]; save(); }
     else if (p[0] === 'helper') { S.settings.helper[p[1]] = !S.settings.helper[p[1]]; save(); }
     else if (ui[p[0]]) ui[p[0]][p[1]] = !ui[p[0]][p[1]];
     render();
@@ -2270,7 +2317,7 @@ var ACTIONS = {
   potIn: function (el) { potMove(el.getAttribute('data-id'), 1); },
   potOut: function (el) { potMove(el.getAttribute('data-id'), -1); },
   askDelPot: function (el) { ui.confirm = { title: 'Delete this pot?', text: 'The pot will be removed. Any money in it is not moved anywhere by the app.', yes: 'Yes, delete', act: 'delPot', id: el.getAttribute('data-id') }; render(); },
-  delPot: function (id) { if (needPin('delPot', id)) return; S.pots = S.pots.filter(function (p) { return p.id !== id; }); save(); ui.pot = null; toast('Deleted'); go(ui.potBack || 'pots'); },
+  delPot: function (id) { if (needPin('delPot', id)) return; S.pots = S.pots.filter(function (p) { return p.id !== id; }); if (S.settings.keep.potId === id) S.settings.keep.potId = ''; save(); ui.pot = null; toast('Deleted'); go(ui.potBack || 'pots'); },
   ciAdd: function () { ui.add = newAdd('checkin'); go('add'); },
   ciMatch: function (el) { ui.ciOk = ui.ciOk || {}; ui.ciOk[el.getAttribute('data-id')] = true; render(); },
   ciChange: function (el) { var id = el.getAttribute('data-id'); ui.card = null; ui.debt = null; ui.cardBack = 'checkin'; ui.debtBack = 'checkin'; go((acct(id) ? 'card/' : 'debt/') + id); },
@@ -2301,6 +2348,17 @@ var ACTIONS = {
   doPrint: function () { window.print(); },
   askWipe: function () { ui.confirm = { title: 'Delete everything?', text: 'All my money information will be removed from this phone. This cannot be undone. Make a backup first if I might want it later.', yes: 'Yes, delete all', act: 'wipe' }; render(); },
   wipe: function () { if (needPin('wipe')) return; try { localStorage.removeItem(STORE_KEY); } catch (e) {} S = defaultState(); ui = resetUI(); save(); toast('Everything has been deleted'); go('setup'); },
+  setKeep: function (val) {
+    var n = num(val); n = n > 0 ? round2(n) : 0;
+    if (n === keepAmount()) { render(); return; }
+    if (needPin('setKeep', n)) return;
+    S.settings.keep.amount = n; S.lastWarn = null; save(); toast(n ? money(n) + ' will be kept back each month' : 'Keep back is off'); render();
+  },
+  keepPot: function (el) {
+    var id = el.getAttribute ? el.getAttribute('data-id') : el;
+    if (needPin('keepPot', id)) return;
+    S.settings.keep.potId = id || ''; save(); render();
+  },
   setStartDay: function (val) {
     var n = Math.max(1, Math.min(28, parseInt(val, 10) || 1));
     if (n === startDay()) { render(); return; }
@@ -2491,8 +2549,10 @@ document.addEventListener('input', function (e) {
   }
 });
 document.addEventListener('change', function (e) {
-  if (e.target && e.target.getAttribute && e.target.getAttribute('data-change') === 'startDay') { ACTIONS.setStartDay(e.target.value); return; }
-  if (e.target && e.target.getAttribute && e.target.getAttribute('data-bind') === 'item.date') { render(); return; }
+  // redraw after the box has finished losing focus, so the page is not replaced mid-blur
+  if (e.target && e.target.getAttribute && e.target.getAttribute('data-change') === 'startDay') { var sv = e.target.value; setTimeout(function () { ACTIONS.setStartDay(sv); }, 0); return; }
+  if (e.target && e.target.getAttribute && e.target.getAttribute('data-change') === 'keepAmount') { var kv = e.target.value; setTimeout(function () { ACTIONS.setKeep(kv); }, 0); return; }
+  if (e.target && e.target.getAttribute && e.target.getAttribute('data-bind') === 'item.date') { setTimeout(render, 0); return; }
   var b = e.target.getAttribute && e.target.getAttribute('data-bind');
 });
 document.addEventListener('keydown', function (e) {

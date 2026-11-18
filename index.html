@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.9.2';
+var APP_VERSION = '1.9.3';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -602,6 +602,17 @@ function moneyToCome(d) {
 function txInMonth(d) { return txInPeriod(period(d)); }
 
 /* The main calculation behind Today, warnings and "Should I buy it?" */
+/* how Today judges the pace of spending. Used for Today and for every past day on the calendar,
+   so the two always agree. LEEWAY: how far past the line spending can be (as a share of the month) before amber. */
+var LEEWAY = 0.05;
+function paceStatus(budget, days, dom, spent) {
+  var left = budget - spent, daysLeft = days - dom + 1;
+  var lineFrac = (dom - 1) / days, usedFrac = budget > 0 ? spent / budget : (spent > 0 ? 1 : 0);
+  var perDay = Math.max(0, left / daysLeft), plannedDaily = budget / days;
+  if (left <= 0.004) return 'stop';
+  if (usedFrac > lineFrac + LEEWAY || (plannedDaily > 0 && perDay < plannedDaily * 0.6)) return 'warn';
+  return 'ok';
+}
 function calc(d) {
   d = d || today();
   var p = plan(), pr = period(d);
@@ -630,9 +641,7 @@ function calc(d) {
   var lineFrac = (dom - 1) / days;
   var usedFrac = budget > 0 ? spent / budget : (spent > 0 ? 1 : 0);
   var perDay = Math.max(0, left / daysLeft);
-  var status = 'ok';
-  if (left <= 0.004) status = 'stop';
-  else if (usedFrac > lineFrac + 0.10 || (plannedDaily > 0 && perDay < plannedDaily * 0.6)) status = 'warn';
+  var status = paceStatus(budget, days, dom, spent);
   var pd = nextPayday(d);
   return {
     plan: p, period: pr, budget: budget, ahead: ahead, inMonth: inMonth, spent: spent, spentToday: spentToday, left: left,
@@ -642,7 +651,7 @@ function calc(d) {
   };
 }
 
-/* a day is "on track" if, by the end of it, spending in the budget month was at or under the black line.
+/* a day is "on track" if, at the end of it, Today would have shown the green tick (same rule, same leeway).
    Results are keyed by date (YYYY-MM-DD). */
 function periodResults(pr, upTo) {
   var p = plan(), inMonth = 0;
@@ -656,7 +665,7 @@ function periodResults(pr, upTo) {
     if (k < startIso) continue;
     // money booked ahead only lowers the line from the day it was added, so earlier days never change
     var budget = base - ahead.reduce(function (s, t) { return s + (addedOn(t) <= k ? t.amount : 0); }, 0);
-    res[k] = run <= budget * (i + 1) / pr.days + 0.004 ? 'ok' : 'over';
+    res[k] = paceStatus(budget, pr.days, i + 1, run) === 'ok' ? 'ok' : 'over';
   }
   return res;
 }
@@ -1204,7 +1213,7 @@ function vCalendar() {
     h += '<button type="button" class="' + cls.join(' ') + '" data-act="calSel" data-val="' + dd + '" aria-label="' + longDate(dt) + '"' + (dd === ui.calSel ? ' aria-pressed="true"' : '') + '><span>' + dd + '</span><span class="marks">' + marks + '</span></button>';
   }
   h += '</div>';
-  h += '<div class="grid2 small muted"><span class="row" style="gap:.4rem">' + sig('ok', 14) + 'On track that day</span><span class="row" style="gap:.4rem">' + sig('warn', 14) + 'Went over the line</span>' +
+  h += '<div class="grid2 small muted"><span class="row" style="gap:.4rem">' + sig('ok', 14) + 'On track that day</span><span class="row" style="gap:.4rem">' + sig('warn', 14) + 'Ahead of the line</span>' +
     '<span class="row" style="gap:.4rem"><span class="billmark"></span>A bill goes out</span><span class="row" style="gap:.4rem"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v16M5 12l7 7 7-7"/></svg>Money comes in</span></div>';
   var sd = new Date(y, m, ui.calSel), rows = '';
   allBills().forEach(function (b) {
@@ -1538,10 +1547,10 @@ function savePot(id) {
 function vStreak() {
   var d = today(), s = streakInfo(d);
   var h = header('Good days', 'Days I stayed on track');
-  if (!s.total) return h + empty('Good days will show here from tomorrow. A good day is when my spending is at or under the black line on the Today screen.');
+  if (!s.total) return h + empty('Good days will show here from tomorrow. A good day is when, by the end of the day, my spending this month so far is on track (a green tick on Today).');
   var cells = s.keys;
   h += '<section class="card" style="align-items:center;text-align:center"><span class="muted">Good days this month</span>' + (startDay() !== 1 ? '<span class="small muted">' + s.thisName + '</span>' : '') + '<span class="big" style="font-size:4.4rem">' + s.good + ' <span style="font-size:1.7rem;color:var(--muted);font-weight:400">of ' + s.total + '</span></span>' +
-    '<div role="img" aria-label="' + s.good + ' good days and ' + (s.total - s.good) + ' days over" style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:.35rem;width:100%">' + cells.map(function (k) {
+    '<div role="img" aria-label="' + s.good + ' good days and ' + (s.total - s.good) + ' days ahead of the line" style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:.35rem;width:100%">' + cells.map(function (k) {
       return '<span class="col" style="align-items:center">' + sig(s.res[k] === 'ok' ? 'ok' : 'warn', 28) + '<span class="tiny muted">' + parseISO(k).getDate() + '</span></span>';
     }).join('') + '</div></section>';
   h += '<section class="grid2"><div class="card tight"><span class="small muted">Days in a row now</span><span class="mid">' + s.current + '</span></div><div class="card tight"><span class="small muted">Best this month</span><span class="mid">' + s.best + (s.best ? ' <span class="small muted" style="font-weight:400">(from ' + dayMonth(parseISO(s.bestStart)) + ')</span>' : '') + '</span></div></section>';
@@ -1614,7 +1623,7 @@ function vCheckIn() {
     var s = streakInfo(d), good = 0, total = 0;
     for (var i = 0; i < 7; i++) { var x = addDays(ws, i); if (x >= d) continue; var r = s.res[iso(x)]; if (r) { total++; if (r === 'ok') good++; } }
     var spent = 0; for (var j = 0; j < 7; j++) { var y = addDays(ws, j); if (y <= d) spent += spentOn(iso(y)); }
-    h += '<h2 style="font-size:1.3rem">How my week went</h2>' + (total ? '<span class="mid">' + good + ' of ' + total + ' good days</span>' : '') + '<span>Spent this week: <b>' + money2(spent) + '</b></span><span class="small muted">A good day is when my spending is at or under the black line.</span>';
+    h += '<h2 style="font-size:1.3rem">How my week went</h2>' + (total ? '<span class="mid">' + good + ' of ' + total + ' good days</span>' : '') + '<span>Spent this week: <b>' + money2(spent) + '</b></span><span class="small muted">A good day is when, by the end of the day, my spending this month so far is on track (a green tick on Today).</span>';
   }
   h += '</section><div class="btnrow one-two push"><button class="btn ghost" data-act="ciBack"' + (step === 0 ? ' disabled' : '') + '>Back</button><button class="btn" data-act="ciNext">' + (step === 3 ? 'Finish check-in' : 'Next: ' + labels[step + 1].charAt(0).toLowerCase() + labels[step + 1].slice(1)) + '</button></div>';
   return h;
@@ -1732,7 +1741,7 @@ function vPrint() {
     '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem"><div class="box" style="border:1px solid #8A949E;display:flex;flex-direction:column;gap:.4rem"><b>Bills this week (already set aside)</b>' + (bills || '<span>None this week</span>') + '<span style="font-size:.8rem;color:#52606D">Tick the box when it has gone out.</span></div>' +
     '<div class="box" style="border:1px solid #8A949E;display:flex;flex-direction:column;gap:.4rem"><b>Waiting on my wish list</b>' + (S.wish.length ? S.wish.map(function (w) { return '<div style="display:flex;justify-content:space-between"><span>' + esc(w.name) + '</span><b>' + money(w.price) + '</b></div>'; }).join('') : '<span>Nothing</span>') + '</div></div>' +
     '<div class="box lines" style="border:1px solid #8A949E"><b>Notes</b><div></div><div></div><div></div></div>' +
-    '<div style="display:flex;gap:1.5rem;font-size:.85rem;color:#52606D;flex-wrap:wrap"><span>○ Colour in green if I stayed on track</span><span>△ Colour in amber if I went over</span></div></div>';
+    '<div style="display:flex;gap:1.5rem;font-size:.85rem;color:#52606D;flex-wrap:wrap"><span>○ Colour in green if I stayed on track</span><span>△ Colour in amber if I was ahead of the line</span></div></div>';
   return h;
 }
 
@@ -1761,7 +1770,7 @@ var HELP = {
   today: ['About the Today screen', [['The big number', 'How much I can spend today. My bills and savings are already taken off.'], ['Left this week and this month', 'The same money, shown for the rest of the week and the rest of the month.'], ['The bar', 'How much spending money I have used. The black line shows where I should be by today.'], ['The signal at the top', 'Green circle: on track. Amber triangle: slow down. Red octagon: stop spending on extras.'], ['Coming out soon', 'Bills due in the next 7 days. The first 3 show – tap “Show all” to see the rest.']]],
   add: ['Adding money in or out', [['Money in or out', 'Choose which one first.'], ['Just once or regular', '“Just once” is for everyday spending. Weekly, monthly or yearly adds it to my regular bills or income.'], ['Paid with a card', 'If I pick a credit or store card, its balance goes up by the same amount.'], ['Was this in my plan?', 'Choose “No, an extra” for anything I had not planned, like a treat. It still comes out of my spending money the same way. It lets me see how much went on extras this month.'], ['A later date', 'If something is just once and I pick a later date, the money is set aside straight away. My daily amount goes down a little now, not a lot on the day. It shows in “Coming out soon” and on the calendar.']]],
   inout: ['About Money in & out', [['Counts as … a month', 'For things that are not monthly, this is the share counted each month.'], ['Set aside bar', 'For bills that come less often than monthly: how much has built up towards the next one.'], ['The coloured bar', 'Shows how my money coming in is split between bills, saving and spending money.'], ['Regular', 'Things that happen every week or month. Tap one to change it.'], ['One-offs', 'Everything I added this month. Tap one to delete it. Extras have an amber “Extra” tag.']]],
-  calendar: ['About the calendar', [['Green circle', 'I was on track that day.'], ['Amber triangle', 'I went over the line that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.'], ['Bills that are not monthly', 'They show the full amount on the day they go out, and how much is counted for them each month.']]],
+  calendar: ['About the calendar', [['Green circle', 'On track: by the end of that day, my spending this month so far was on track. Today would have shown the green tick.'], ['Amber triangle', 'Ahead of the line: my spending this month so far was past the line by the end of that day. It may not mean I spent anything that day.'], ['Dark square', 'A bill goes out that day.'], ['Green arrow', 'Money comes in that day.'], ['Tap a day', 'See what happens on that day.'], ['Bills that are not monthly', 'They show the full amount on the day they go out, and how much is counted for them each month.']]],
   cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],
   debt: ['About this debt', [['Who it is owed to', 'The company, bank or person.'], ['It started at', 'The amount at the start, so the app can show how much is paid off.'], ['Monthly payment', 'Set aside like a bill until the debt is paid off.'], ['Paid off by', 'An estimate using the payment and the APR.']]],
   fullpay: ['About paying the bill', [['How much I paid', 'The amount on the bill.'], ['The whole bill', 'If all of it was paid, there is no interest.'], ['Only part', 'Interest is charged on what was not paid.']]],
@@ -1772,7 +1781,7 @@ var HELP = {
   wish: ['About my wish list', [['What it is', 'Things I decided to wait for.'], ['Check it now', 'Asks “Should I buy it?” again with today’s numbers.']]],
   pots: ['About savings pots', [['Jars', 'Show how full each pot is.'], ['Each month', 'This amount is set aside on pay day, like a bill.'], ['Tap a pot', 'To put money in, take money out, or change it.']]],
   pot: ['About this pot', [['Put money in', 'Moves money from my spending money into the pot.'], ['Take money out', 'Moves money from the pot back into my spending money.']]],
-  streak: ['About good days', [['A good day', 'My spending was at or under the black line that day.'], ['Days in a row', 'Starts again after a day that went over. The good days still count.']]],
+  streak: ['About good days', [['A good day', 'By the end of that day, my spending this month so far was on track. Today would have shown the green tick.'], ['Days in a row', 'Starts again after a day that was ahead of the line. The good days still count.']]],
   item: ['About regular money', [['How often', 'Weekly, every 4 weeks, monthly, every 3 months or yearly. “Something else” is for any other number of weeks or months.'], ['Spread out', 'For things that are not monthly, the app sets aside a share every month.'], ['Set aside so far', 'The bar shows how much has built up towards the next payment. That money is in my bank account – it should not be spent.'], ['Weekends and bank holidays', 'For money coming in, choose whether it arrives the working day before, the working day after, or always on the date.'], ['Next payment', 'The box shows the real date the money is due next.']]],
   tocome: ['About money not here yet', [['What it is', 'Regular money that is due later in this money month.'], ['Already counted', 'It is already included in “Left this month”, so I should not spend it before it arrives.']]],
   extras: ['About my extras', [['What counts', 'Anything I marked “No, an extra” when I added it.'], ['Why it helps', 'It shows how much went on things I had not planned, and what they were for.']]],

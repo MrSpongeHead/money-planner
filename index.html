@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.9.1';
+var APP_VERSION = '1.9.2';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -557,6 +557,7 @@ function isAhead(t) {
   if (t.ahead !== undefined) return !!t.ahead;
   return !!(t.created && t.date > iso(new Date(t.created)));
 }
+function addedOn(t) { return t.addedOn || (t.created ? iso(new Date(t.created)) : '0000-00-00'); }
 function aheadIn(pr) { return S.tx.filter(function (t) { return isAhead(t) && t.date >= pr.startIso && t.date <= pr.endIso; }); }
 function aheadTotal(pr) { return round2(aheadIn(pr).reduce(function (s, t) { return s + t.amount; }, 0)); }
 function spentOn(dIso) { var s = 0; S.tx.forEach(function (t) { if (t.type === 'out' && t.date === dIso && !isAhead(t)) s += t.amount; }); return s; }
@@ -646,13 +647,15 @@ function calc(d) {
 function periodResults(pr, upTo) {
   var p = plan(), inMonth = 0;
   S.tx.forEach(function (t) { if (t.type === 'in' && t.date >= pr.startIso && t.date <= pr.endIso) inMonth += t.amount; });
-  var budget = p.spending + inMonth - aheadTotal(pr), run = 0, res = {};
+  var base = p.spending + inMonth, ahead = aheadIn(pr), run = 0, res = {};
   var startIso = S.startDate || '0000-00-00';
   for (var i = 0; i < pr.days; i++) {
     var dt = addDays(pr.start, i), k = iso(dt);
     run += spentOn(k);
     if (upTo && dt >= upTo) break;
     if (k < startIso) continue;
+    // money booked ahead only lowers the line from the day it was added, so earlier days never change
+    var budget = base - ahead.reduce(function (s, t) { return s + (addedOn(t) <= k ? t.amount : 0); }, 0);
     res[k] = run <= budget * (i + 1) / pr.days + 0.004 ? 'ok' : 'over';
   }
   return res;
@@ -1108,6 +1111,7 @@ function saveAdd() {
   if (a.freq === 'once') {
     var t = { id: uid(), date: a.date, type: a.type, amount: amt, category: a.cat, name: name, paidWith: a.type === 'out' ? a.paidWith : null, planned: a.type === 'out' ? a.planned === 'yes' : true };
     if (t.type === 'out') t.ahead = t.date > iso(today());
+    t.addedOn = iso(today());
     pushTx(t);
     if (t.type === 'out') { var ac = acct(t.paidWith); if (ac) ac.balance = round2((ac.balance || 0) + amt); }
   } else {

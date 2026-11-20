@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.9.3';
+var APP_VERSION = '1.10.0';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -708,7 +708,17 @@ function monthlyInterest(a, d) {
   return a.balance * a.apr / 1200;
 }
 /* what is due on the payment day: the whole balance for a pay-in-full card */
-function dueAmount(a) { return a.payFull ? (a.balance || 0) : (a.payment || 0); }
+/* statements: a card paid in full can have a statement day. Then the app knows the bill (what was on the
+   last statement) and when it is due, and asks about paying it only then. Spending after the statement goes on
+   the next bill. a.bill = {amount, due} while a bill is waiting; a.stmtDone = the last statement dealt with. */
+function hasStmt(a) { return !!(a && a.payFull && a.stmtDay > 0); }
+function stmtOn(a, y, m) { return new Date(y, m, Math.min(a.stmtDay, dim(y, m))); }
+function lastStmtDate(a, d) { d = d || today(); var s = stmtOn(a, d.getFullYear(), d.getMonth()); return s > d ? stmtOn(a, d.getMonth() === 0 ? d.getFullYear() - 1 : d.getFullYear(), (d.getMonth() + 11) % 12) : s; }
+function nextStmtDate(a, d) { d = d || today(); var s = stmtOn(a, d.getFullYear(), d.getMonth()); return s > d ? s : stmtOn(a, d.getMonth() === 11 ? d.getFullYear() + 1 : d.getFullYear(), (d.getMonth() + 1) % 12); }
+function dueAfterStmt(a, s) { return nextOccurrence({ freq: 'monthly', day: a.payDay || 1 }, addDays(s, 1), 40); }
+function stmtWaiting(a, d) { if (!hasStmt(a)) return null; var s = lastStmtDate(a, d); return (!a.stmtDone || a.stmtDone < iso(s)) ? s : null; }
+function dueAmount(a) { if (hasStmt(a)) return a.bill ? a.bill.amount : 0; return a.payFull ? (a.balance || 0) : (a.payment || 0); }
+function dueDateOf(a, d) { if (hasStmt(a)) return a.bill ? parseISO(a.bill.due) : null; d = d || today(); return new Date(d.getFullYear(), d.getMonth(), Math.min(a.payDay || 1, dim(d.getFullYear(), d.getMonth()))); }
 function usedPct(a) { return a.limit > 0 ? Math.round(a.balance / a.limit * 100) : 0; }
 function paidWithName(pw) {
   if (pw === 'bank') return 'Bank card'; if (pw === 'cash') return 'Cash';
@@ -923,6 +933,7 @@ function upcomingBills(from, days) {
     var d = addDays(from, i);
     allBills().forEach(function (b) { if (occursOn(b, d)) out.push({ b: b, d: d, inDays: i }); });
     var k = iso(d);
+    S.accounts.forEach(function (a) { if (hasStmt(a) && a.bill && a.bill.due === k && a.bill.amount > 0) out.push({ b: { name: a.name + ' bill', amount: a.bill.amount, category: 'Card payment', isCard: true, accountId: a.id, cardBill: true }, d: d, inDays: i }); });
     S.tx.forEach(function (t) { if (t.date === k && isAhead(t)) out.push({ b: { name: t.name, amount: t.amount, category: t.category, oneOff: true }, d: d, inDays: i }); });
   }
   return out;
@@ -984,8 +995,29 @@ function reminders(d) {
     out.push('<div class="item">' + sig('warn', 26) + '<span class="grow col"><span class="name">Bank holiday dates need updating</span><span class="meta">The app knows them up to the end of ' + BH_LAST_YEAR + '. Ask for a new version.</span></span></div>');
   }
   allOwed().forEach(function (a) {
-    if (!(dueAmount(a) > 0) || a.lastPaid === k || !(a.balance > 0)) return;
     var nm = a.limit !== undefined ? a.name : debtTitle(a);
+    if (hasStmt(a)) {
+      var sd = stmtWaiting(a, d);
+      if (sd && !ui.dismissed['stmt:' + a.id + ':' + iso(d)]) {
+        var bv = ui.stmtIn && ui.stmtIn[a.id] !== undefined ? ui.stmtIn[a.id] : '';
+        out.push('<div class="card tight"><div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><b>My ' + esc(nm) + ' statement is out</b><span class="small muted">Statement of ' + dayMonth(sd) + '. How much is the bill? It is on the statement, to pay by ' + shortDate(dueAfterStmt(a, sd)) + '.</span></span></div>' +
+          '<label class="fld">The bill (£)<span class="hint">Type 0 if there is nothing to pay.</span><input class="inp" data-bind="stmtIn.' + a.id + '" inputmode="decimal" value="' + esc(bv) + '" placeholder="0.00"></label>' +
+          (ui.stmtErr === a.id ? '<p class="err" role="alert">Please type the amount on the statement.</p>' : '') +
+          '<div class="btnrow"><button class="btn sm" data-act="stmtSave" data-id="' + a.id + '">Save</button><button class="btn sm ghost" data-act="dismiss" data-key="stmt:' + a.id + ':' + iso(d) + '">Not yet</button></div></div>');
+      }
+      if (!a.bill) return;
+      var bd = parseISO(a.bill.due), bn = diffDays(d, bd);
+      if (bn < 0 || (bn === 0 && st.remindOnDay)) {
+        if (ui.dismissed['paid:' + a.id + ':' + iso(d)]) return;
+        out.push('<div class="card tight"><div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><b>Did I pay the ' + esc(nm) + ' bill?</b><span class="small muted">' + money2(a.bill.amount) + (bn === 0 ? ' is due today.' : ' was due on ' + shortDate(bd) + '.') + '</span></span></div>' +
+          '<div class="btnrow"><a class="btn sm" href="#fullpay/' + a.id + '">Yes, I paid it</a><button class="btn sm ghost" data-act="dismiss" data-key="paid:' + a.id + ':' + iso(d) + '">Not yet</button></div></div>');
+      } else if (bn > 0 && bn <= st.remindDays) {
+        var gb = soon[iso(bd)] || (soon[iso(bd)] = { due: bd, n: bn, names: [], total: 0 });
+        gb.names.push(nm); gb.total += a.bill.amount;
+      }
+      return;
+    }
+    if (!(dueAmount(a) > 0) || a.lastPaid === k || !(a.balance > 0)) return;
     var due = new Date(d.getFullYear(), d.getMonth(), Math.min(a.payDay || 1, dim(d.getFullYear(), d.getMonth())));
     var n = diffDays(d, due);
     if (n < 0 || (n === 0 && st.remindOnDay)) {
@@ -1051,7 +1083,7 @@ function vToday() {
   if (up.length) {
     var upTotal = upAll.reduce(function (s, u) { return s + u.b.amount; }, 0);
     h += '<section class="list"><div class="row between"><h2 class="sec-title">Coming out soon</h2><span class="small muted">Next 7 days: ' + upAll.length + ' · ' + money(round2(upTotal)) + '</span></div>' + up.map(function (u) {
-      return '<div class="item">' + billIcon(u.b) + '<span class="grow col"><span class="name">' + esc(u.b.name) + '</span><span class="meta">' + longDate(u.d) + ' · ' + inDaysText(u.inDays) + ' · money set aside</span></span><span class="amt">' + money(u.b.amount) + '</span></div>';
+      return '<div class="item">' + billIcon(u.b) + '<span class="grow col"><span class="name">' + esc(u.b.name) + '</span><span class="meta">' + longDate(u.d) + ' · ' + inDaysText(u.inDays) + (u.b.cardBill ? ' · already counted when I spent it' : ' · money set aside') + '</span></span><span class="amt">' + money(u.b.amount) + '</span></div>';
     }).join('') + (upAll.length > 3 ? '<button class="btn sm ghost" data-act="soonToggle">' + (ui.soonAll ? 'Show fewer' : 'Show all ' + upAll.length) + '</button>' : '') + '</section>';
   }
   h += '<section class="grid4">' + [['calendar', 'cal', 'Calendar'], ['streak', 'star', 'Good days'], ['pots', 'jar', 'Pots'], ['wish', 'heart', 'Wish list']].map(function (x) {
@@ -1317,14 +1349,23 @@ function cardItem(a) {
       '<div class="row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow" style="font-weight:700">' + esc(a.name) + '</span><span style="font-weight:700">' + money0(a.balance || 0) + ' owed</span></div>' +
       (a.limit > 0 ? '<div role="img" aria-label="' + pct + ' percent of the limit used">' + bar(pct, kind ? STATUS_FILL[kind] : 'var(--primary)', 'thin') + '</div>' +
         '<div class="row between small muted"><span>' + pct + '% of ' + money0(a.limit) + ' limit used</span>' + (kind ? '<span class="flag ' + kind + '-ink">' + sig(kind, 16) + (kind === 'stop' ? 'At or near limit' : 'Close to limit') + '</span>' : '') + '</div>' : '') +
+      cardBillLine(a) +
       '<div class="pills"><span class="tiny" style="background:var(--bg);border-radius:.5rem;padding:.25rem .5rem">APR ' + (a.apr ? a.apr + '%' : '–') + '</span><span class="tiny" style="background:var(--primary-soft);color:var(--primary-deep);border-radius:.5rem;padding:.25rem .5rem;font-weight:700">' + intTxt + '</span></div></a>';
 }
 
+function cardBillLine(a) {
+  if (!hasStmt(a)) return '';
+  var d = today(), t;
+  if (stmtWaiting(a, d)) t = '<b>Statement is out</b> – add the bill on Today';
+  else if (a.bill) { var n = diffDays(d, parseISO(a.bill.due)); t = '<b>Bill: ' + money2(a.bill.amount) + '</b> to pay by ' + shortDate(parseISO(a.bill.due)) + (n > 0 ? ' (' + inDaysText(n) + ')' : n === 0 ? ' (today)' : ' (was due)'); }
+  else t = 'No bill to pay · next statement ' + shortDate(nextStmtDate(a, d));
+  return '<span class="small">' + t + '</span>';
+}
 function vCard(id) {
   var isNew = id === 'new', src = isNew ? null : acct(id);
   if (!isNew && !src) return backHeader('Card not found', 'cards');
   if (!ui.card || ui.card.key !== id) {
-    ui.card = { key: id, name: src ? src.name : '', colour: src ? src.colour : COLOURS[0][1], balance: src ? String(src.balance || 0) : '', limit: src && src.limit ? String(src.limit) : '', apr: src && src.apr ? String(src.apr) : '', payDay: src ? String(src.payDay || '') : '', payment: src && src.payment ? String(src.payment) : '', zeroDeal: src ? !!src.zeroDeal : false, zeroEnds: src ? (src.zeroEnds || '') : '', payFull: src ? !!src.payFull : false, pay: '', err: '' };
+    ui.card = { key: id, name: src ? src.name : '', colour: src ? src.colour : COLOURS[0][1], balance: src ? String(src.balance || 0) : '', limit: src && src.limit ? String(src.limit) : '', apr: src && src.apr ? String(src.apr) : '', payDay: src ? String(src.payDay || '') : '', payment: src && src.payment ? String(src.payment) : '', zeroDeal: src ? !!src.zeroDeal : false, zeroEnds: src ? (src.zeroEnds || '') : '', payFull: src ? !!src.payFull : false, stmtDay: src && src.stmtDay ? String(src.stmtDay) : '', billQ: '', billAmt: '', billDue: '', pay: '', err: '' };
   }
   var f = ui.card, back = ui.cardBack || 'cards';
   var h = backHeader(isNew ? 'Add a card or store account' : 'Change this card', back, { sub: ui.cardBack && ui.cardBack.indexOf('setup') === 0 ? 'Setting up · step 3 of 6' : '' });
@@ -1338,9 +1379,11 @@ function vCard(id) {
     '<label class="fld">Owed now (£)<input class="inp" data-bind="card.balance" inputmode="decimal" value="' + esc(f.balance) + '"></label>' +
     '<label class="fld">Limit (£)<input class="inp" data-bind="card.limit" inputmode="decimal" value="' + esc(f.limit) + '"></label>' +
     '<label class="fld">APR (%)<input class="inp" data-bind="card.apr" inputmode="decimal" value="' + esc(f.apr) + '"></label>' +
-    '<label class="fld">Payment day<input class="inp" data-bind="card.payDay" inputmode="numeric" value="' + esc(f.payDay) + '" placeholder="1–31"></label></div>';
+    '<label class="fld">Payment due day<input class="inp" data-bind="card.payDay" inputmode="numeric" value="' + esc(f.payDay) + '" placeholder="1–31"></label></div>';
   h += '<div class="card tight"><div class="setrow"><span><b>I pay this card off in full every month</b></span>' + sw('card.payFull', f.payFull, 'I pay this card off in full every month') + '</div>' +
-    (f.payFull ? '<span class="small muted">No interest is shown while the whole bill is paid each month. On the payment day the app asks if the full payment went out. Nothing extra is set aside, because what I buy with the card already comes out of my spending money.</span>' : '') + '</div>';
+    (f.payFull ? '<span class="small muted">No interest is shown while the whole bill is paid each month. Nothing extra is set aside, because what I buy with the card already comes out of my spending money.</span>' +
+      '<label class="fld">Statement day<span class="hint">The day each month the statement is made. It is on the statement. With this, the app asks for the bill when the statement comes, and asks if I paid it on the due day. Leave empty if not sure.</span><input class="inp" data-bind="card.stmtDay" inputmode="numeric" value="' + esc(f.stmtDay) + '" placeholder="1–31"></label>' +
+      '<div data-pv="billq">' + cardBillQHtml(f, src) + '</div>' : '') + '</div>';
   if (!f.payFull) h += '<label class="fld">How much I pay each month (£)<span class="hint">This is set aside like a bill. Leave empty if I don’t pay a set amount.</span><input class="inp" data-bind="card.payment" inputmode="decimal" value="' + esc(f.payment) + '"></label>';
   h += '<p class="small muted">The APR and limit are on the latest statement. Leave the APR empty if unsure – the interest just won’t be shown for this card.</p>';
   h += '<div class="card tight"><div class="setrow"><span>Is there a 0% deal?</span>' + sw('card.zeroDeal', f.zeroDeal, 'Is there a 0% deal') + '</div>' +
@@ -1352,6 +1395,27 @@ function vCard(id) {
   h += '<div class="push col" style="gap:.6rem"><button class="btn" data-act="saveCard" data-id="' + id + '">Save</button>' + (isNew ? '' : '<button class="btn danger" data-act="askDelCard" data-id="' + id + '">Delete this card</button>') + '</div>';
   return h;
 }
+/* the one-off question when a statement day is first set (or changed) */
+function cardNeedsBillQ(f, src) {
+  var sd = parseInt(f.stmtDay, 10);
+  if (!f.payFull || !(sd >= 1 && sd <= 31)) return false;
+  return !src || !hasStmt(src) || src.stmtDay !== sd;
+}
+function cardBillQHtml(f, src) {
+  if (!cardNeedsBillQ(f, src)) return '';
+  var h = '<section class="col" style="gap:.5rem;margin-top:.4rem"><h2 class="sec-title">Is there a bill waiting to be paid on this card?</h2><span class="small muted">From a statement that has already come.</span><div class="grid2">' +
+    '<button type="button" class="choice" data-act="pick" data-group="card.billQ" data-val="yes" aria-pressed="' + (f.billQ === 'yes') + '">Yes</button>' +
+    '<button type="button" class="choice" data-act="pick" data-group="card.billQ" data-val="no" aria-pressed="' + (f.billQ === 'no') + '">No, it is all paid</button></div>';
+  if (f.billQ === 'yes') {
+    var pd = parseInt(f.payDay, 10), dueGuess = pd >= 1 ? iso(nextOccurrence({ freq: 'monthly', day: pd }, today(), 40)) : '';
+    if (!f.billDue && dueGuess) f.billDue = dueGuess;
+    h += '<div class="grid2"><label class="fld">The bill (£)<input class="inp" data-bind="card.billAmt" inputmode="decimal" value="' + esc(f.billAmt) + '" placeholder="0.00"></label>' +
+      '<label class="fld">To pay by<input class="inp" type="date" data-bind="card.billDue" value="' + esc(f.billDue) + '"></label></div>';
+  } else if (f.billQ === 'no') {
+    h += '<span class="small muted">Everything owed now goes on the next statement.</span>';
+  }
+  return h + '</section>';
+}
 function saveCard(id) {
   var f = ui.card;
   if (!f.name.trim()) { f.err = 'Please type a name.'; render(); return; }
@@ -1359,7 +1423,16 @@ function saveCard(id) {
   var data = { name: f.name.trim(), colour: f.colour, balance: round2(bal), limit: num(f.limit) > 0 ? round2(num(f.limit)) : 0, apr: num(f.apr) > 0 ? num(f.apr) : 0, payDay: Math.min(31, Math.max(1, parseInt(f.payDay, 10) || 1)), payment: !f.payFull && num(f.payment) > 0 ? round2(num(f.payment)) : 0, zeroDeal: !!f.zeroDeal, zeroEnds: f.zeroDeal ? f.zeroEnds : '', payFull: !!f.payFull };
   if (!data.payFull) data.carried = 0;
   var src = id === 'new' ? null : acct(id);
-  var sensitive = !src || ['limit', 'apr', 'payment', 'payDay', 'payFull'].some(function (k) { return src[k] !== data[k]; });
+  var sdv = parseInt(f.stmtDay, 10); data.stmtDay = data.payFull && sdv >= 1 && sdv <= 31 ? sdv : 0;
+  var askBill = cardNeedsBillQ(f, src);
+  if (askBill) {
+    if (f.billQ !== 'yes' && f.billQ !== 'no') { f.err = 'Please say if there is a bill waiting to be paid.'; render(); return; }
+    if (f.billQ === 'yes' && !(num(f.billAmt) > 0)) { f.err = 'Please type the bill amount.'; render(); return; }
+    if (f.billQ === 'yes' && !/^\d{4}-\d{2}-\d{2}$/.test(f.billDue || '')) { f.err = 'Please choose when the bill is due.'; render(); return; }
+    data.stmtDone = iso(lastStmtDate(data, today()));
+    data.bill = f.billQ === 'yes' ? { amount: round2(num(f.billAmt)), due: f.billDue } : null;
+  } else if (!data.stmtDay) { data.bill = null; data.stmtDone = null; }
+  var sensitive = !src || ['limit', 'apr', 'payment', 'payDay', 'payFull', 'stmtDay'].some(function (k) { return src[k] !== data[k]; });
   if (sensitive && needPin('saveCard', id)) return;
   if (src) Object.keys(data).forEach(function (k) { src[k] = data[k]; });
   else { data.id = uid(); data.lastPaid = null; S.accounts.push(data); }
@@ -1574,10 +1647,10 @@ function vReminders() {
       (a.apr ? '<span class="small muted">If ' + money0(a.balance) + ' is still owed then, interest could be about ' + money2(after) + ' a month at ' + a.apr + '% APR. Check the real rate on the statement.</span>' : '<span class="small muted">Add the APR that starts after the deal to see what it could cost.</span>') +
       '<span class="small row" style="gap:.4rem;font-weight:700">' + ic('bell', 18) + 'I will be reminded from ' + dayMonth(remind) + ' ' + remind.getFullYear() + '</span></section>';
   });
-  var pays = allOwed().filter(function (a) { return dueAmount(a) > 0 && a.balance > 0; });
+  var pays = allOwed().filter(function (a) { return hasStmt(a) ? !!a.bill : dueAmount(a) > 0 && a.balance > 0; });
   h += '<section class="list"><h2 class="sec-title">Card and debt payments due</h2>' + (pays.length ? pays.map(function (a) {
-    var due = nextOccurrence({ freq: 'monthly', day: a.payDay || 1 }, d, 40), rem = addDays(due, -st.remindDays);
-    var paid = a.lastPaid === monthKey(due);
+    var due = hasStmt(a) ? parseISO(a.bill.due) : nextOccurrence({ freq: 'monthly', day: a.payDay || 1 }, d, 40), rem = addDays(due, -st.remindDays);
+    var paid = !hasStmt(a) && a.lastPaid === monthKey(due);
     return '<div class="item"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow col"><span class="name">' + esc(a.limit !== undefined ? a.name : debtTitle(a)) + '</span><span class="meta">Due ' + shortDate(due) + (paid ? ' · already paid' : ' · reminder ' + (rem < d ? 'now' : shortDate(rem))) + '</span></span><span class="amt">' + (a.payFull ? 'Full bill' : money(a.payment)) + '</span></div>';
   }).join('') : '<p class="small muted">No payments set. Add them on the “What I owe” screen.</p>') + '</section>';
   h += '<section class="card"><b>Remind me before a payment</b>' + seg('set.remindDays', [[1, '1 day'], [3, '3 days'], [7, '1 week']], st.remindDays) +
@@ -1774,7 +1847,7 @@ var HELP = {
   cards: ['About What I owe', [['Two lists', 'Cards and store accounts, and other debts and loans. Switch between them with the buttons at the top.'], ['Card bar', 'How much of the limit I have used. Amber means close to the limit.'], ['Green bar on a debt', 'How much of it I have paid off so far.'], ['Interest', 'About how much each one costs me each month. It is an estimate.'], ['Tap one', 'To change it or record a payment.']]],
   debt: ['About this debt', [['Who it is owed to', 'The company, bank or person.'], ['It started at', 'The amount at the start, so the app can show how much is paid off.'], ['Monthly payment', 'Set aside like a bill until the debt is paid off.'], ['Paid off by', 'An estimate using the payment and the APR.']]],
   fullpay: ['About paying the bill', [['How much I paid', 'The amount on the bill.'], ['The whole bill', 'If all of it was paid, there is no interest.'], ['Only part', 'Interest is charged on what was not paid.']]],
-  card: ['About this card', [['Paid in full every month', 'Turn this on if I always pay the whole bill. No interest is shown, and the app asks on payment day if the bill was paid.'], ['Owed now', 'How much I owe today. Check it against the statement or app.'], ['Payment', 'The amount I pay each month. It is set aside like a bill.'], ['0% deal', 'If there is one, add the end date so I get a reminder.']]],
+  card: ['About this card', [['Paid in full every month', 'Turn this on if I always pay the whole bill. No interest is shown, and the app asks on the due day if the bill was paid.'], ['Payment due day', 'The day the payment must reach the card – not the day the statement is made.'], ['Statement day', 'For a card paid in full. When the statement comes, the app asks how much the bill is, then shows it to pay by the due day. Anything bought after the statement goes on the next bill.'], ['Owed now', 'How much I owe today. Check it against the statement or app.'], ['Payment', 'The amount I pay each month. It is set aside like a bill.'], ['0% deal', 'If there is one, add the end date so I get a reminder.']]],
   interest: ['About interest', [['Interest each month', 'Which card costs me the most money right now.'], ['Cost for every £100', 'Which card is the most expensive to owe money on.'], ['Estimates', 'The real interest on the statement can be a little different.']]],
   buy: ['About “Should I buy it?”', [['Type what and how much', 'Then tap Check.'], ['The answer', 'Yes, Think first, or No – always with the reasons.'], ['Remind me on pay day', 'Puts it on my wish list so I can check again later.']]],
   rules: ['About the rules', [['Always the same', 'The answer only depends on these rules and my numbers.']]],
@@ -2063,7 +2136,7 @@ function updateLeftSummary() {
 function vFullPay(id) {
   var a = acct(id);
   if (!a) return backHeader('Card not found', 'today');
-  if (!ui.fullpay || ui.fullpay.key !== id) ui.fullpay = { key: id, amount: (a.balance || 0).toFixed(2), all: 'yes', rest: '', err: '' };
+  if (!ui.fullpay || ui.fullpay.key !== id) ui.fullpay = { key: id, amount: (hasStmt(a) && a.bill ? a.bill.amount : (a.balance || 0)).toFixed(2), all: 'yes', rest: '', err: '' };
   var f = ui.fullpay;
   var h = backHeader('I paid my ' + esc(a.name) + ' bill', 'today');
   h += '<div class="card tight row"><span class="swatch" style="background:' + esc(a.colour) + '"></span><span class="grow" style="font-weight:700">' + esc(a.name) + '</span><b>' + money2(a.balance || 0) + ' owed now</b></div>';
@@ -2232,6 +2305,7 @@ var ACTIONS = {
     var g = el.getAttribute('data-group'), v = el.getAttribute('data-val');
     if (g === 'add.type' && ui.add) { ui.add.type = v; ui.add.cat = v === 'out' ? 'Food shop' : 'Wages'; }
     else if (g === 'debt.type' && ui.debt) { ui.debt.type = v; if (!ui.debt.colourSet) ui.debt.colour = DEBT_COLOURS[v] || ui.debt.colour; }
+    else if (g === 'card.billQ' && ui.card) { ui.card.billQ = v; ui.card.err = ''; }
     else if (g === 'debt.colour' && ui.debt) { ui.debt.colour = v; ui.debt.colourSet = true; }
     else setByPath(g, v);
     if (g.indexOf('buy.') === 0 && ui.buy) ui.buy.result = null;
@@ -2296,6 +2370,16 @@ var ACTIONS = {
   cardPaid: function (el) { var a = payable(el.getAttribute('data-id')); if (!a) return; var amt = Math.min(a.payment, a.balance || 0); a.balance = round2(Math.max(0, (a.balance || 0) - a.payment)); a.lastPaid = monthKey(today()); save(); toast(money(amt) + ' taken off ' + (a.limit !== undefined ? 'the ' + a.name : debtTitle(a))); render(); },
   dismiss: function (el) { ui.dismissed[el.getAttribute('data-key')] = true; render(); },
   saveCard: function (el) { var id = el && el.getAttribute ? el.getAttribute('data-id') : el; saveCard(id); },
+  stmtSave: function (el) {
+    var id = el.getAttribute('data-id'), a = acct(id); if (!a || !hasStmt(a)) return;
+    var raw = ui.stmtIn ? ui.stmtIn[id] : '', amt = round2(num(raw));
+    if (raw === undefined || String(raw).trim() === '' || !isFinite(amt) || amt < 0) { ui.stmtErr = id; render(); return; }
+    var sd = stmtWaiting(a, today()) || lastStmtDate(a, today());
+    a.stmtDone = iso(sd);
+    a.bill = amt > 0 ? { amount: amt, due: iso(dueAfterStmt(a, sd)) } : null;
+    ui.stmtErr = null; if (ui.stmtIn) delete ui.stmtIn[id]; save();
+    toast(amt > 0 ? 'Saved – ' + money2(amt) + ' to pay by ' + shortDate(parseISO(a.bill.due)) : 'Saved – nothing to pay this time'); render();
+  },
   fullPaySave: function (el) {
     var a = acct(el.getAttribute('data-id')), f = ui.fullpay; if (!a || !f) return;
     var amt = round2(num(f.amount));
@@ -2303,13 +2387,16 @@ var ACTIONS = {
     var rest = f.all === 'no' ? round2(num(f.rest)) : 0;
     if (f.all === 'no' && !(rest > 0)) { f.err = 'Please type how much of the bill is still not paid.'; render(); return; }
     a.balance = round2(Math.max(0, (a.balance || 0) - amt));
-    a.carried = Math.min(rest, a.balance); a.lastPaid = monthKey(today()); save(); ui.fullpay = null;
+    a.carried = Math.min(rest, a.balance); a.lastPaid = monthKey(today());
+    if (hasStmt(a)) a.bill = null;
+    save(); ui.fullpay = null;
     toast(rest > 0 ? 'Saved – interest will show on ' + money2(a.carried) : 'Saved – paid in full, no interest'); go('today');
   },
   cardPay: function (el) {
     var a = acct(el.getAttribute('data-id')), amt = round2(num(ui.card && ui.card.pay));
     if (!a || !(amt > 0)) { if (ui.card) ui.card.err = 'Type the amount paid.'; render(); return; }
     a.balance = round2(Math.max(0, (a.balance || 0) - amt)); a.lastPaid = monthKey(today());
+    if (hasStmt(a) && a.bill) { var lb = round2(a.bill.amount - amt); a.bill = lb > 0.004 ? { amount: lb, due: a.bill.due } : null; }
     if (a.carried > 0) a.carried = round2(Math.max(0, Math.min(a.carried - amt, a.balance)));
     save();
     ui.card.balance = String(a.balance); ui.card.pay = ''; ui.card.err = ''; toast(money2(amt) + ' taken off'); render();
@@ -2576,6 +2663,7 @@ document.addEventListener('input', function (e) {
     if (sh) sh.innerHTML = itemShareHtml(ui.item);
     if (nx) nx.innerHTML = itemNextHtml(ui.item, nx.getAttribute('data-id'));
   }
+  if (p[0] === 'card' && (p[1] === 'stmtDay' || p[1] === 'payDay')) { var bq = document.querySelector('[data-pv="billq"]'); if (bq) bq.innerHTML = cardBillQHtml(ui.card, ui.card.key === 'new' ? null : acct(ui.card.key)); }
   if ((p[0] === 'card' || p[0] === 'debt') && /^(name|owedTo|balance)$/.test(p[1])) {
     var f = ui[p[0]], tEl = document.querySelector('[data-pv="title"]'), oEl = document.querySelector('[data-pv="owed"]');
     if (tEl) tEl.textContent = p[0] === 'card' ? (f.name || 'Name') : (f.name || f.owedTo || debtType(f.type)[1]);

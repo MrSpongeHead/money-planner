@@ -257,7 +257,7 @@ h1:focus{outline:none}
 /* ===== Money Planner – core: storage, dates, money maths ===== */
 
 var STORE_KEY = 'moneyPlanner.v1';
-var APP_VERSION = '1.10.0';
+var APP_VERSION = '1.10.1';
 
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4); }
 
@@ -380,13 +380,27 @@ function nominalOccurs(item, d) {
   return false;
 }
 /* bills that come round less often than monthly: how much has built up towards the next one */
+/* when a spread-out payment starts setting aside its monthly share: as late as possible while still having the
+   whole amount by its first due date (one share per money month), but never before the money month it was added in.
+   Returns the date shares start: the day it was added (that month counts), or the start of a later money month. */
+function spreadStart(b) {
+  var added = parseISO(b.added || S.startDate || iso(today()));
+  if (!isSpread(b) || b.freq === 'nweeks') return iso(added);
+  var from = b.start && parseISO(b.start) > added ? parseISO(b.start) : added;   // the date entered is the next one due
+  var k = b.freq === 'yearly' ? 12 : b.n, due = nextNominal(b, from);
+  if (!due) return iso(added);
+  var pr = period(due);
+  for (var i = 0; i < k - 1; i++) pr = period(addDays(pr.start, -1));
+  return pr.start <= period(added).start ? iso(added) : pr.startIso;
+}
 function isSpread(b) { return b.freq === 'yearly' || (b.freq === 'nmonths' && b.n >= 2) || (b.freq === 'nweeks' && b.n >= 5); }
 function setAside(b, d) {
   d = d || today();
   var share = perMonth(b.amount, b.freq, b.n);
   var added = parseISO(b.added || S.startDate || iso(d)); if (added > d) added = d;
-  var starts = {}, pr = period(added), guard = 0;
-  starts[iso(added)] = true;                       // the month it was added in already counts a share
+  var first = parseISO(spreadStart(b)); if (first < added) first = added;
+  var starts = {}, pr = period(first), guard = 0;
+  starts[iso(first)] = true;                       // the first month that counts a share
   for (pr = period(pr.next); pr.start <= d && guard < 80; pr = period(pr.next), guard++) starts[pr.startIso] = true;
   var bal = 0, paidAny = false;
   for (var x = added, i = 0; x <= d && i < 3000; x = addDays(x, 1), i++) {
@@ -515,10 +529,11 @@ function payoff(x, from) {
   return { months: n, date: last };
 }
 
-function plan() {
-  var inc = 0, out = 0, sav = 0;
+function shareCounts(b, pr) { return !isSpread(b) || spreadStart(b) <= pr.endIso; }
+function plan(d) {
+  var inc = 0, out = 0, sav = 0, pr = period(d || today());
   S.incomes.forEach(function (i) { inc += perMonth(i.amount, i.freq, i.n); });
-  allBills().forEach(function (b) { out += perMonth(b.amount, b.freq, b.n); });
+  allBills().forEach(function (b) { if (shareCounts(b, pr)) out += perMonth(b.amount, b.freq, b.n); });
   S.pots.forEach(function (p) { sav += p.monthly || 0; });
   var k = keepAmount(), shown = S.settings.keep && S.settings.keep.show;
   // when the keep-back amount is hidden it is shown as part of "Saving", so it never looks like spare money
@@ -615,7 +630,7 @@ function paceStatus(budget, days, dom, spent) {
 }
 function calc(d) {
   d = d || today();
-  var p = plan(), pr = period(d);
+  var p = plan(d), pr = period(d);
   var days = pr.days, dom = diffDays(pr.start, d) + 1, dIso = iso(d);
   var inMonth = 0, spent = 0, spentBefore = 0, spentToday = 0;
   S.tx.forEach(function (t) {
@@ -654,7 +669,7 @@ function calc(d) {
 /* a day is "on track" if, at the end of it, Today would have shown the green tick (same rule, same leeway).
    Results are keyed by date (YYYY-MM-DD). */
 function periodResults(pr, upTo) {
-  var p = plan(), inMonth = 0;
+  var p = plan(pr.start), inMonth = 0;
   S.tx.forEach(function (t) { if (t.type === 'in' && t.date >= pr.startIso && t.date <= pr.endIso) inMonth += t.amount; });
   var base = p.spending + inMonth, ahead = aheadIn(pr), run = 0, res = {};
   var startIso = S.startDate || '0000-00-00';
@@ -1221,6 +1236,8 @@ function setAsideHtml(b) {
   if (!sa.next) return '';
   var h = '<span role="img" aria-label="' + money(sa.saved) + ' of ' + money(sa.target) + ' set aside">' + bar(sa.target > 0 ? sa.saved / sa.target * 100 : 0, 'var(--primary-mid)', 'xthin') + '</span>' +
     '<span class="small muted">' + money(round2(sa.saved)) + ' of ' + money(sa.target) + ' set aside for ' + dayMonth(sa.next) + '</span>';
+  var st = spreadStart(b);
+  if (st > iso(today())) h += '<span class="small muted">Setting aside starts on ' + dayMonth(parseISO(st)) + ' (my pay day). That is still in time.</span>';
   if (sa.short > 0.5) h += '<span class="flag warn-ink">' + sig('warn', 16) + money(sa.short) + ' short' + (sa.first ? ' the first time' : ' this time') + '</span>';
   return h;
 }
@@ -1271,7 +1288,7 @@ function vItem(kind, id) {
     var uiFreq = src ? src.freq : 'monthly', un = '2', unit = 'months';
     if (src && src.freq === 'nmonths' && src.n === 3) uiFreq = 'q3';
     else if (src && (src.freq === 'nweeks' || src.freq === 'nmonths')) { uiFreq = 'custom'; un = String(src.n); unit = src.freq === 'nweeks' ? 'weeks' : 'months'; }
-    ui.item = { key: kind + '/' + id, name: src ? src.name : '', amount: src ? String(src.amount) : '', freq: uiFreq, n: un, unit: unit, date: start, shift: src ? (src.shift || 'none') : (kind === 'inc' ? 'before' : 'none'), err: '' };
+    ui.item = { key: kind + '/' + id, name: src ? src.name : '', amount: src ? String(src.amount) : '', freq: uiFreq, n: un, unit: unit, date: start, added: src ? (src.added || '') : '', shift: src ? (src.shift || 'none') : (kind === 'inc' ? 'before' : 'none'), err: '' };
   }
   var f = ui.item, isNew = id === 'new';
   var back = ui.itemBack || 'inout';
@@ -1310,7 +1327,12 @@ function itemFreq(f) {
 function itemShareHtml(f) {
   var fr = itemFreq(f);
   if (!fr || fr.freq === 'weekly' || fr.freq === 'monthly' || !(num(f.amount) > 0)) return '';
-  return '<div class="card soft tight small">' + ic('info', 18) + ' <span>About <b>' + money2(perMonth(num(f.amount), fr.freq, fr.n)) + ' a month</b> is counted for this, so the cost is spread out.</span></div>';
+  var when = '';
+  if (fr.freq !== 'nweeks' && /^\d{4}-\d{2}-\d{2}$/.test(f.date || '')) {
+    var pdt = parseISO(f.date), st = spreadStart({ freq: fr.freq, n: fr.n, day: pdt.getDate(), weekday: pdt.getDay(), start: f.date, added: f.added || iso(today()) });
+    when = st > iso(today()) ? ' It starts from my pay day on ' + dayMonth(parseISO(st)) + ', which is still in time.' : ' It starts this money month.';
+  }
+  return '<div class="card soft tight small">' + ic('info', 18) + ' <span>About <b>' + money2(perMonth(num(f.amount), fr.freq, fr.n)) + ' a month</b> is counted for this, so the cost is spread out.' + when + '</span></div>';
 }
 function itemNextHtml(f, id) {
   var fr = itemFreq(f);
